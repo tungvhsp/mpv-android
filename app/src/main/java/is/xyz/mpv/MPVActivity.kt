@@ -158,6 +158,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         }
     }
 
+    private val hideSubTextDebugRunnable = Runnable {
+        binding.subTextDebugView.visibility = View.GONE
+    }
+
     private val stopServiceRunnable = Runnable {
         val intent = Intent(this, BackgroundPlaybackService::class.java)
         applicationContext.stopService(intent)
@@ -357,6 +361,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         // take the background service with us
         stopServiceRunnable.run()
+        fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
 
         player.removeObserver(this)
         player.destroy()
@@ -1716,6 +1721,20 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.cycleSpeedBtn.text = getString(R.string.ui_speed, psc.speed)
     }
 
+    private fun showSubTextDebug(text: String) {
+        fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
+
+        val trimmedText = text.trim()
+        if (trimmedText.isEmpty()) {
+            binding.subTextDebugView.visibility = View.GONE
+            return
+        }
+
+        binding.subTextDebugView.text = "TTS subtitle: $trimmedText"
+        binding.subTextDebugView.visibility = View.VISIBLE
+        fadeHandler.postDelayed(hideSubTextDebugRunnable, SUB_TEXT_DEBUG_TIMEOUT)
+    }
+
     private fun updatePlaylistButtons() {
         val plCount = psc.playlistCount
         val plPos = psc.playlistPos
@@ -1899,6 +1918,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: String, metaUpdated: Boolean) {
         if (!activityIsForeground) return
         when (property) {
+            "sub-text" -> showSubTextDebug(value)
             "speed" -> updateSpeedButton()
         }
         if (metaUpdated)
@@ -2117,6 +2137,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         private const val CONTROLS_FADE_DURATION = 500L
         // resolution (px) of the thumbnail displayed with playback notification
         private const val THUMB_SIZE = 384
+        private const val SUB_TEXT_DEBUG_TIMEOUT = 3000L
         // smallest aspect ratio that is considered non-square
         private const val ASPECT_RATIO_MIN = 1.2f // covers 5:4 and up
         // fraction to which audio volume is ducked on loss of audio focus
