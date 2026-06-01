@@ -23,6 +23,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.*
 import android.preference.PreferenceManager.getDefaultSharedPreferences
+import android.speech.tts.TextToSpeech
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.DisplayMetrics
@@ -52,6 +53,7 @@ import androidx.media.AudioFocusRequestCompat
 import androidx.media.AudioManagerCompat
 import java.io.File
 import java.lang.IllegalArgumentException
+import java.util.Locale
 import kotlin.math.roundToInt
 
 typealias ActivityResultCallback = (Int, Intent?) -> Unit
@@ -79,6 +81,11 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequestCompat? = null
     private var audioFocusRestore: () -> Unit = {}
+    private var subtitleTts: TextToSpeech? = null
+    private var subtitleTtsReady = false
+    private var currentSubStart: Double? = null
+    private var currentSubEnd: Double? = null
+    private var lastSpokenSubtitleKey = ""
 
     private val psc = Utils.PlaybackStateCache()
     private var mediaSession: MediaSessionCompat? = null
@@ -267,6 +274,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         // Initialize listeners for the player view
         initListeners()
+        initSubtitleTts()
 
         gestures = TouchGestures(this)
 
@@ -362,6 +370,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // take the background service with us
         stopServiceRunnable.run()
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
+        subtitleTts?.stop()
+        subtitleTts?.shutdown()
+        subtitleTts = null
+        subtitleTtsReady = false
 
         player.removeObserver(this)
         player.destroy()
@@ -1721,10 +1733,85 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.cycleSpeedBtn.text = getString(R.string.ui_speed, psc.speed)
     }
 
+    private fun initSubtitleTts() {
+        subtitleTts = TextToSpeech(applicationContext) { status ->
+            if (status != TextToSpeech.SUCCESS) {
+                subtitleTtsReady = false
+                return@TextToSpeech
+            }
+
+            val result = subtitleTts?.setLanguage(Locale("vi", "VN"))
+            subtitleTtsReady =
+                result != TextToSpeech.LANG_MISSING_DATA &&
+                result != TextToSpeech.LANG_NOT_SUPPORTED
+            subtitleTts?.setPitch(1.0f)
+        }
+    }
+
+    private fun normalizeSubtitleText(text: String): String {
+        return text.replace(Regex("\\s+"), " ").trim()
+    }
+
+    private fun subtitleWordCount(text: String): Int {
+        val normalizedText = normalizeSubtitleText(text)
+        if (normalizedText.isEmpty())
+            return 0
+        return normalizedText.split(Regex("\\s+")).size
+    }
+
+    private fun subtitleDurationSec(): Double? {
+        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
+        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+        if (start == null || end == null)
+            return null
+
+        val duration = end - start
+        return if (duration > 0.0) duration else null
+    }
+
+    private fun speechRateForSubtitle(text: String): Float {
+        val wordCount = subtitleWordCount(text)
+        if (wordCount == 0)
+            return DEFAULT_SUBTITLE_SPEECH_RATE
+
+        val duration = subtitleDurationSec()
+            ?: (wordCount / VIETNAMESE_WORDS_PER_SECOND)
+        val availableDuration = (duration - SUBTITLE_TTS_TIMING_MARGIN_SEC)
+            .coerceAtLeast(MIN_SUBTITLE_TTS_DURATION_SEC)
+        val rate = wordCount / (VIETNAMESE_WORDS_PER_SECOND * availableDuration)
+
+        return rate.toFloat().coerceIn(MIN_SUBTITLE_SPEECH_RATE, MAX_SUBTITLE_SPEECH_RATE)
+    }
+
+    private fun speakSubtitle(text: String) {
+        if (!subtitleTtsReady)
+            return
+
+        val normalizedText = normalizeSubtitleText(text)
+        if (normalizedText.isEmpty())
+            return
+
+        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
+        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+        val subtitleKey = "$start|$end|$normalizedText"
+        if (subtitleKey == lastSpokenSubtitleKey)
+            return
+        lastSpokenSubtitleKey = subtitleKey
+
+        val rate = speechRateForSubtitle(normalizedText)
+        subtitleTts?.setSpeechRate(rate)
+        subtitleTts?.speak(
+            normalizedText,
+            TextToSpeech.QUEUE_ADD,
+            null,
+            "mpv-subtitle-${SystemClock.uptimeMillis()}"
+        )
+    }
+
     private fun showSubTextDebug(text: String) {
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
 
-        val trimmedText = text.trim()
+        val trimmedText = normalizeSubtitleText(text)
         if (trimmedText.isEmpty()) {
             binding.subTextDebugView.visibility = View.GONE
             return
@@ -1733,6 +1820,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.subTextDebugView.text = "TTS subtitle: $trimmedText"
         binding.subTextDebugView.visibility = View.VISIBLE
         fadeHandler.postDelayed(hideSubTextDebugRunnable, SUB_TEXT_DEBUG_TIMEOUT)
+        speakSubtitle(trimmedText)
     }
 
     private fun updatePlaylistButtons() {
@@ -1908,6 +1996,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (!activityIsForeground) return
         when (property) {
             "duration/full" -> updatePlaybackDuration(psc.durationSec)
+            "sub-start/full" -> currentSubStart = value
+            "sub-end/full" -> currentSubEnd = value
             "video-params/aspect", "video-params/rotate" -> {
                 updateOrientation()
                 updatePiPParams()
@@ -2138,6 +2228,12 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // resolution (px) of the thumbnail displayed with playback notification
         private const val THUMB_SIZE = 384
         private const val SUB_TEXT_DEBUG_TIMEOUT = 3000L
+        private const val VIETNAMESE_WORDS_PER_SECOND = 2.8
+        private const val SUBTITLE_TTS_TIMING_MARGIN_SEC = 0.15
+        private const val MIN_SUBTITLE_TTS_DURATION_SEC = 0.45
+        private const val DEFAULT_SUBTITLE_SPEECH_RATE = 1.0f
+        private const val MIN_SUBTITLE_SPEECH_RATE = 0.75f
+        private const val MAX_SUBTITLE_SPEECH_RATE = 2.5f
         // smallest aspect ratio that is considered non-square
         private const val ASPECT_RATIO_MIN = 1.2f // covers 5:4 and up
         // fraction to which audio volume is ducked on loss of audio focus

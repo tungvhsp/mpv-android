@@ -181,6 +181,8 @@ internal class MPVView(context: Context, attrs: AttributeSet) : BaseMPVView(cont
             Property("duration/full", MPV_FORMAT_DOUBLE),
             Property("pause", MPV_FORMAT_FLAG),
             Property("paused-for-cache", MPV_FORMAT_FLAG),
+            Property("sub-start/full", MPV_FORMAT_DOUBLE),
+            Property("sub-end/full", MPV_FORMAT_DOUBLE),
             Property("sub-text", MPV_FORMAT_STRING),
             Property("speed", MPV_FORMAT_STRING),
             Property("track-list"),
