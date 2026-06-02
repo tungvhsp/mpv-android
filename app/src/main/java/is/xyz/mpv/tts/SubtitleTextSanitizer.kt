@@ -1,7 +1,7 @@
 package `is`.xyz.mpv.tts
 
 /** Removes markup from subtitle lines before sending text to Sherpa TTS. */
-internal object SubtitleTextSanitizer {
+object SubtitleTextSanitizer {
     /** Sherpa can crash on very long ASS lines; keep a safe upper bound. */
     private const val MAX_CHARS = 400
 

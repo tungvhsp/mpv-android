@@ -24,7 +24,9 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.*
 import android.preference.PreferenceManager.getDefaultSharedPreferences
+import `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_STRING
 import `is`.xyz.mpv.tts.EmbeddedSubtitleTts
+import `is`.xyz.mpv.tts.SubtitleTextSanitizer
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.DisplayMetrics
@@ -1779,7 +1781,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun ensureSubtitleTextObservation() {
         if (!subtitleTtsEnabled || !subtitleTtsReady || subtitleTextObserved)
             return
-        MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING)
+        MPVLib.observeProperty("sub-text", MPV_FORMAT_STRING)
         subtitleTextObserved = true
         Log.d(TAG, "Observing sub-text for embedded TTS")
     }
