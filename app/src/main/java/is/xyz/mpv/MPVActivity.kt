@@ -23,6 +23,7 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.*
 import android.preference.PreferenceManager.getDefaultSharedPreferences
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -1733,10 +1734,15 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun initSubtitleTts() {
-        subtitleTts = TextToSpeech(applicationContext) { status ->
-            subtitleTtsReady = status == TextToSpeech.SUCCESS
-            subtitleTts?.setPitch(1.0f)
-        }
+        val defaultEngine = Settings.Secure.getString(contentResolver, "tts_default_synth")
+        subtitleTts = TextToSpeech(
+            applicationContext,
+            { status ->
+                subtitleTtsReady = status == TextToSpeech.SUCCESS
+                subtitleTts?.setPitch(1.0f)
+            },
+            defaultEngine
+        )
     }
 
     private fun normalizeSubtitleText(text: String): String {
