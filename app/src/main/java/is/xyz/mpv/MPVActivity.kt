@@ -93,6 +93,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var currentSubStart: Double? = null
     private var currentSubEnd: Double? = null
     private var lastSpokenSubtitleKey = ""
+    private val subtitleTextPollRunnable = Runnable { pollSubtitleTextForTts() }
 
     private val psc = Utils.PlaybackStateCache()
     private var mediaSession: MediaSessionCompat? = null
@@ -390,6 +391,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // take the background service with us
         stopServiceRunnable.run()
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
+        stopSubtitleTextPolling()
         embeddedSubtitleTts?.shutdown()
         embeddedSubtitleTts = null
         subtitleTtsReady = false
@@ -1771,6 +1773,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         subtitleTtsEnabled = !subtitleTtsEnabled
         if (!subtitleTtsEnabled) {
             embeddedSubtitleTts?.stop()
+            stopSubtitleTextPolling()
         } else {
             prepareEmbeddedSubtitleTts(showErrors = true)
         }
@@ -1784,6 +1787,42 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         MPVLib.observeProperty("sub-text", MPV_FORMAT_STRING)
         subtitleTextObserved = true
         Log.d(TAG, "Observing sub-text for embedded TTS")
+    }
+
+    private fun onSubtitleTtsModelsReady() {
+        ensureSubtitleTextObservation()
+        startSubtitleTextPolling()
+        pollSubtitleTextForTts()
+        // Defer heavy ONNX load so install UI can finish without a native crash.
+        fadeHandler.postDelayed({
+            embeddedSubtitleTts?.warmupEngines()
+        }, 800L)
+    }
+
+    private fun startSubtitleTextPolling() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady)
+            return
+        fadeHandler.removeCallbacks(subtitleTextPollRunnable)
+        fadeHandler.postDelayed(subtitleTextPollRunnable, 400L)
+    }
+
+    private fun stopSubtitleTextPolling() {
+        fadeHandler.removeCallbacks(subtitleTextPollRunnable)
+    }
+
+    private fun pollSubtitleTextForTts() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady) {
+            stopSubtitleTextPolling()
+            return
+        }
+        try {
+            val text = readCurrentSubtitleText()
+            if (!text.isNullOrBlank())
+                handleSubtitleTextForTts(text)
+        } catch (t: Throwable) {
+            Log.e(TAG, "subtitle text poll failed", t)
+        }
+        fadeHandler.postDelayed(subtitleTextPollRunnable, 400L)
     }
 
     private fun initSubtitleTts() {
@@ -1801,12 +1840,16 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (engine.isReady()) {
             subtitleTtsReady = true
             subtitleTtsPreparing = false
+            onSubtitleTtsModelsReady()
             pendingSubtitleSpeak?.invoke()
             pendingSubtitleSpeak = null
             return
         }
-        if (engine.isPreparing() || subtitleTtsPreparing)
+        if (engine.isPreparing() || subtitleTtsPreparing) {
+            if (onReady != null)
+                pendingSubtitleSpeak = onReady
             return
+        }
 
         subtitleTtsPreparing = true
         subtitleTtsReady = false
@@ -1822,11 +1865,14 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             } else {
                 binding.subTextDebugView.visibility = View.GONE
                 Log.i(TAG, "Embedded subtitle TTS ready")
+                showToast(getString(R.string.tts_ready))
             }
 
             if (ok) {
-                ensureSubtitleTextObservation()
+                onSubtitleTtsModelsReady()
                 pendingSubtitleSpeak?.invoke()
+            } else {
+                stopSubtitleTextPolling()
             }
             pendingSubtitleSpeak = null
         }
@@ -1864,6 +1910,20 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         binding.subTextDebugView.text = message
         binding.subTextDebugView.visibility = View.VISIBLE
+    }
+
+    private fun readCurrentSubtitleText(): String? {
+        val candidates = arrayOf(
+            "sub-text",
+            "sub-text/ass",
+            "sub-text-ass",
+        )
+        for (prop in candidates) {
+            val value = MPVLib.getPropertyString(prop)
+            if (!value.isNullOrBlank())
+                return value
+        }
+        return null
     }
 
     private fun normalizeSubtitleText(text: String): String {
@@ -1941,15 +2001,17 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun showSubTextDebug(text: String) {
+        handleSubtitleTextForTts(text)
+    }
+
+    private fun handleSubtitleTextForTts(text: String) {
         if (!subtitleTtsEnabled || !subtitleTtsReady)
             return
 
         val trimmedText = normalizeSubtitleText(text)
-        if (trimmedText.isEmpty()) {
-            binding.subTextDebugView.visibility = View.GONE
+        if (trimmedText.isEmpty())
             return
-        }
-        binding.subTextDebugView.visibility = View.GONE
+
         speakSubtitle(trimmedText)
     }
 

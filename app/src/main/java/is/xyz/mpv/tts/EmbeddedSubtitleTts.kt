@@ -24,10 +24,12 @@ class EmbeddedSubtitleTts(context: Context) {
     private var enTts: OfflineTts? = null
 
     @Volatile
-    private var ready = false
+    private var modelsInstalled = false
 
     @Volatile
     private var preparing = false
+
+    private val prepareCallbacks = ArrayList<(Boolean, String?) -> Unit>()
 
     @Volatile
     private var stopRequested = false
@@ -37,7 +39,7 @@ class EmbeddedSubtitleTts(context: Context) {
     private var audioTrackSampleRate = 0
     private val usePcmFloat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
 
-    fun isReady(): Boolean = ready
+    fun isReady(): Boolean = modelsInstalled
 
     fun isPreparing(): Boolean = preparing
 
@@ -45,35 +47,72 @@ class EmbeddedSubtitleTts(context: Context) {
         onProgress: ((String) -> Unit)? = null,
         callback: (Boolean, String?) -> Unit,
     ) {
-        if (ready) {
-            callback(true, null)
+        if (modelsInstalled) {
+            mainHandler.post { callback(true, null) }
             return
         }
-        if (preparing)
+
+        var startInstall = false
+        synchronized(this) {
+            prepareCallbacks.add(callback)
+            if (preparing)
+                return
+            preparing = true
+            startInstall = true
+        }
+        if (!startInstall)
             return
 
-        preparing = true
         worker.execute {
             try {
                 SubtitleTtsModels.ensureInstalled(appContext) { status ->
                     mainHandler.post { onProgress?.invoke(status) }
                 }
-                initEngines()
-                ready = true
-                preparing = false
-                mainHandler.post { callback(true, null) }
+                finishPrepare(success = true, error = null)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to prepare embedded TTS", t)
-                preparing = false
-                mainHandler.post { callback(false, t.message ?: "unknown error") }
+                finishPrepare(success = false, error = t.message ?: "unknown error")
             }
         }
     }
 
-    private fun initEngines() {
-        viTts?.free()
-        enTts?.free()
-        enTts = null
+    /** Load ONNX engines off the download path to reduce OOM/crash right after extract. */
+    fun warmupEngines() {
+        if (!modelsInstalled)
+            return
+        worker.execute {
+            try {
+                ensureViEngine()
+                Log.i(TAG, "VI TTS engine warmed up")
+            } catch (t: Throwable) {
+                Log.e(TAG, "VI engine warmup failed", t)
+            }
+            try {
+                ensureEnEngine()
+                Log.i(TAG, "EN TTS engine warmed up")
+            } catch (t: Throwable) {
+                Log.e(TAG, "EN engine warmup failed", t)
+            }
+        }
+    }
+
+    private fun finishPrepare(success: Boolean, error: String?) {
+        val callbacks: List<(Boolean, String?) -> Unit>
+        synchronized(this) {
+            preparing = false
+            if (success)
+                modelsInstalled = true
+            callbacks = prepareCallbacks.toList()
+            prepareCallbacks.clear()
+        }
+        mainHandler.post {
+            for (cb in callbacks)
+                cb(success, error)
+        }
+    }
+
+    private fun ensureViEngine(): OfflineTts {
+        viTts?.let { return it }
 
         val viDir = SubtitleTtsModels.viModelDir(appContext).absolutePath
         val engine = OfflineTts(
@@ -93,6 +132,7 @@ class EmbeddedSubtitleTts(context: Context) {
         )
         engine.sampleRate()
         viTts = engine
+        return engine
     }
 
     private fun ensureEnEngine(): OfflineTts {
@@ -123,7 +163,7 @@ class EmbeddedSubtitleTts(context: Context) {
         return try {
             when (lang) {
                 SubtitleTextSegmenter.Lang.EN -> ensureEnEngine()
-                SubtitleTextSegmenter.Lang.VI -> viTts
+                SubtitleTextSegmenter.Lang.VI -> ensureViEngine()
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to load ${lang.name} TTS engine", t)
@@ -132,7 +172,7 @@ class EmbeddedSubtitleTts(context: Context) {
     }
 
     fun speak(text: String, speed: Float, volume: Float) {
-        if (!ready)
+        if (!modelsInstalled)
             return
 
         val generation = playGeneration.incrementAndGet()
@@ -149,7 +189,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 if (segments.isEmpty())
                     return@execute
 
-                val viEngine = viTts ?: return@execute
+                val viEngine = engineFor(SubtitleTextSegmenter.Lang.VI) ?: return@execute
                 val samples = ArrayList<Float>(4096)
                 var sampleRate = viEngine.sampleRate()
 
@@ -176,9 +216,12 @@ class EmbeddedSubtitleTts(context: Context) {
                         samples.add(s)
                 }
 
-                if (stopRequested || generation != playGeneration.get() || samples.isEmpty())
+                if (stopRequested || generation != playGeneration.get() || samples.isEmpty()) {
+                    Log.w(TAG, "speak produced no audio (${samples.size} samples)")
                     return@execute
+                }
 
+                Log.i(TAG, "playing ${samples.size} samples @ ${sampleRate}Hz")
                 playSamples(samples.toFloatArray(), sampleRate, volume.coerceIn(0f, 1f), generation)
             } catch (e: Exception) {
                 Log.e(TAG, "speak failed for \"$text\"", e)
@@ -204,7 +247,7 @@ class EmbeddedSubtitleTts(context: Context) {
             enTts?.free()
             viTts = null
             enTts = null
-            ready = false
+            modelsInstalled = false
         }
         worker.shutdown()
         mainHandler.post {
@@ -216,7 +259,8 @@ class EmbeddedSubtitleTts(context: Context) {
 
     fun statusLine(): String {
         return when {
-            ready -> "TTS: Sherpa embedded (VI+EN)"
+            modelsInstalled && viTts != null -> "TTS: Sherpa embedded (VI+EN)"
+            modelsInstalled -> "TTS: models OK, loading voice..."
             preparing -> "TTS: preparing models..."
             else -> "TTS: not ready"
         }
@@ -268,11 +312,13 @@ class EmbeddedSubtitleTts(context: Context) {
         } else {
             AudioFormat.ENCODING_PCM_16BIT
         }
-        val bufLength = AudioTrack.getMinBufferSize(
+        val minBuf = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
             encoding,
         )
+        val bytesPerSample = if (usePcmFloat) 4 else 2
+        val bufLength = maxOf(minBuf, sampleRate * bytesPerSample * 2)
         val attr = AudioAttributes.Builder()
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .setUsage(AudioAttributes.USAGE_MEDIA)
