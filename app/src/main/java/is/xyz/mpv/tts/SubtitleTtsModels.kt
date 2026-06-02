@@ -9,6 +9,8 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -95,8 +97,9 @@ internal object SubtitleTtsModels {
             onProgress?.invoke("tts:progress:$archiveName:$percent")
         }
 
-        onProgress?.invoke("tts:extract:$archiveName")
-        extractTarBz2(archive, root)
+        extractTarBz2(archive, root) { percent ->
+            onProgress?.invoke("tts:extract:$archiveName:$percent")
+        }
         archive.delete()
     }
 
@@ -148,8 +151,22 @@ internal object SubtitleTtsModels {
         }
     }
 
-    private fun extractTarBz2(archive: File, destParent: File) {
-        FileInputStream(archive).use { fileInput ->
+    private fun extractTarBz2(
+        archive: File,
+        destParent: File,
+        onPercent: ((Int) -> Unit)?,
+    ) {
+        val totalBytes = archive.length().coerceAtLeast(1L)
+        var lastPercent = -1
+        fun reportProgress(readBytes: Long) {
+            val percent = ((readBytes * 100) / totalBytes).toInt().coerceIn(0, 100)
+            if (percent != lastPercent) {
+                lastPercent = percent
+                onPercent?.invoke(percent)
+            }
+        }
+
+        ProgressFileInputStream(FileInputStream(archive), ::reportProgress).use { fileInput ->
             BufferedInputStream(fileInput).use { buffered ->
                 BZip2CompressorInputStream(buffered).use { bzip ->
                     TarArchiveInputStream(bzip).use { tar ->
@@ -167,6 +184,34 @@ internal object SubtitleTtsModels {
                     }
                 }
             }
+        }
+        onPercent?.invoke(100)
+    }
+
+    /** Reports progress while reading a file (used during tar.bz2 extraction). */
+    private class ProgressFileInputStream(
+        input: InputStream,
+        private val onProgress: (Long) -> Unit,
+    ) : FilterInputStream(input) {
+        private var readBytes = 0L
+
+        override fun read(): Int {
+            val value = super.read()
+            if (value >= 0)
+                onBytesRead(1)
+            return value
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            val count = super.read(b, off, len)
+            if (count > 0)
+                onBytesRead(count.toLong())
+            return count
+        }
+
+        private fun onBytesRead(count: Long) {
+            readBytes += count
+            onProgress(readBytes)
         }
     }
 }

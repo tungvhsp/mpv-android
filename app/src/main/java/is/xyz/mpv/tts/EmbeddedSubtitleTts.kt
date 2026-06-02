@@ -1,6 +1,7 @@
 package `is`.xyz.mpv.tts
 
 import android.content.Context
+import android.os.Build
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -34,6 +35,7 @@ class EmbeddedSubtitleTts(context: Context) {
     private val playGeneration = AtomicInteger(0)
     private var audioTrack: AudioTrack? = null
     private var audioTrackSampleRate = 0
+    private val usePcmFloat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
 
     fun isReady(): Boolean = ready
 
@@ -60,10 +62,10 @@ class EmbeddedSubtitleTts(context: Context) {
                 ready = true
                 preparing = false
                 mainHandler.post { callback(true, null) }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to prepare embedded TTS", e)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Failed to prepare embedded TTS", t)
                 preparing = false
-                mainHandler.post { callback(false, e.message ?: "unknown error") }
+                mainHandler.post { callback(false, t.message ?: "unknown error") }
             }
         }
     }
@@ -71,9 +73,10 @@ class EmbeddedSubtitleTts(context: Context) {
     private fun initEngines() {
         viTts?.free()
         enTts?.free()
+        enTts = null
 
         val viDir = SubtitleTtsModels.viModelDir(appContext).absolutePath
-        viTts = OfflineTts(
+        val engine = OfflineTts(
             config = getOfflineTtsConfig(
                 modelDir = viDir,
                 modelName = SubtitleTtsModels.VI_ONNX,
@@ -85,12 +88,18 @@ class EmbeddedSubtitleTts(context: Context) {
                 dictDir = "",
                 ruleFsts = "",
                 ruleFars = "",
-                numThreads = 2,
+                numThreads = 1,
             ),
         )
+        engine.sampleRate()
+        viTts = engine
+    }
+
+    private fun ensureEnEngine(): OfflineTts {
+        enTts?.let { return it }
 
         val enDir = SubtitleTtsModels.enModelDir(appContext).absolutePath
-        enTts = OfflineTts(
+        val engine = OfflineTts(
             config = getOfflineTtsConfig(
                 modelDir = enDir,
                 modelName = SubtitleTtsModels.EN_ONNX,
@@ -102,9 +111,24 @@ class EmbeddedSubtitleTts(context: Context) {
                 dictDir = "",
                 ruleFsts = "",
                 ruleFars = "",
-                numThreads = 2,
+                numThreads = 1,
             ),
         )
+        engine.sampleRate()
+        enTts = engine
+        return engine
+    }
+
+    private fun engineFor(lang: SubtitleTextSegmenter.Lang): OfflineTts? {
+        return try {
+            when (lang) {
+                SubtitleTextSegmenter.Lang.EN -> ensureEnEngine()
+                SubtitleTextSegmenter.Lang.VI -> viTts
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to load ${lang.name} TTS engine", t)
+            null
+        }
     }
 
     fun speak(text: String, speed: Float, volume: Float) {
@@ -119,23 +143,29 @@ class EmbeddedSubtitleTts(context: Context) {
                 return@execute
 
             try {
-                val segments = SubtitleTextSegmenter.segment(text)
+                val cleanText = SubtitleTextSanitizer.forTts(text)
+                val segments = SubtitleTextSegmenter.segment(cleanText)
                 if (segments.isEmpty())
                     return@execute
 
+                val viEngine = viTts ?: return@execute
                 val samples = ArrayList<Float>(4096)
-                var sampleRate = viTts!!.sampleRate()
+                var sampleRate = viEngine.sampleRate()
 
                 for (segment in segments) {
                     if (stopRequested || generation != playGeneration.get())
                         return@execute
 
-                    val tts = when (segment.lang) {
-                        SubtitleTextSegmenter.Lang.EN -> enTts
-                        SubtitleTextSegmenter.Lang.VI -> viTts
-                    } ?: continue
+                    val segmentText = SubtitleTextSanitizer.forTts(segment.text)
+                    if (segmentText.isEmpty())
+                        continue
 
-                    val audio = tts.generate(text = segment.text, speed = speed.coerceIn(0.5f, 2.5f))
+                    val tts = engineFor(segment.lang) ?: continue
+
+                    val audio = tts.generate(
+                        text = segmentText,
+                        speed = speed.coerceIn(0.5f, 2.5f),
+                    )
                     if (audio.samples.isEmpty())
                         continue
 
@@ -149,7 +179,9 @@ class EmbeddedSubtitleTts(context: Context) {
 
                 playSamples(samples.toFloatArray(), sampleRate, volume.coerceIn(0f, 1f), generation)
             } catch (e: Exception) {
-                Log.e(TAG, "speak failed", e)
+                Log.e(TAG, "speak failed for \"$text\"", e)
+            } catch (e: Error) {
+                Log.e(TAG, "speak native error for \"$text\"", e)
             }
         }
     }
@@ -193,15 +225,34 @@ class EmbeddedSubtitleTts(context: Context) {
             if (stopRequested || generation != playGeneration.get())
                 return@post
 
-            val scaled = if (volume >= 0.999f) {
-                samples
-            } else {
-                FloatArray(samples.size) { i -> samples[i] * volume }
-            }
+            try {
+                val scaled = if (volume >= 0.999f) {
+                    samples
+                } else {
+                    FloatArray(samples.size) { i -> samples[i] * volume }
+                }
 
-            val track = obtainAudioTrack(sampleRate)
-            track.play()
-            track.write(scaled, 0, scaled.size, AudioTrack.WRITE_BLOCKING)
+                val track = obtainAudioTrack(sampleRate)
+                track.play()
+                val chunkSize = 4096
+                var offset = 0
+                while (offset < scaled.size) {
+                    if (stopRequested || generation != playGeneration.get())
+                        return@post
+                    val end = minOf(offset + chunkSize, scaled.size)
+                    if (usePcmFloat) {
+                        track.write(scaled, offset, end - offset, AudioTrack.WRITE_BLOCKING)
+                    } else {
+                        val pcm16 = ShortArray(end - offset) { i ->
+                            (scaled[offset + i].coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                        }
+                        track.write(pcm16, 0, pcm16.size, AudioTrack.WRITE_BLOCKING)
+                    }
+                    offset = end
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "AudioTrack playback failed", t)
+            }
         }
     }
 
@@ -210,17 +261,22 @@ class EmbeddedSubtitleTts(context: Context) {
             return audioTrack!!
 
         audioTrack?.release()
+        val encoding = if (usePcmFloat) {
+            AudioFormat.ENCODING_PCM_FLOAT
+        } else {
+            AudioFormat.ENCODING_PCM_16BIT
+        }
         val bufLength = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_FLOAT,
+            encoding,
         )
         val attr = AudioAttributes.Builder()
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .build()
         val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+            .setEncoding(encoding)
             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
             .setSampleRate(sampleRate)
             .build()

@@ -85,6 +85,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var subtitleTtsReady = false
     private var subtitleTtsPreparing = false
     private var pendingSubtitleSpeak: (() -> Unit)? = null
+    private var subtitleTextObserved = false
     private var subtitleTtsEnabled = false
     private var subtitleTtsVolume = 1.0f
     private var currentSubStart: Double? = null
@@ -1775,10 +1776,19 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         writeSettings()
     }
 
+    private fun ensureSubtitleTextObservation() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady || subtitleTextObserved)
+            return
+        MPVLib.observeProperty("sub-text", MPVLib.MPV_FORMAT_STRING)
+        subtitleTextObserved = true
+        Log.d(TAG, "Observing sub-text for embedded TTS")
+    }
+
     private fun initSubtitleTts() {
         embeddedSubtitleTts = EmbeddedSubtitleTts(applicationContext)
-        if (subtitleTtsEnabled)
+        if (subtitleTtsEnabled) {
             prepareEmbeddedSubtitleTts(showErrors = false)
+        }
     }
 
     private fun prepareEmbeddedSubtitleTts(showErrors: Boolean, onReady: (() -> Unit)? = null) {
@@ -1813,6 +1823,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             }
 
             if (ok) {
+                ensureSubtitleTextObservation()
                 pendingSubtitleSpeak?.invoke()
             }
             pendingSubtitleSpeak = null
@@ -1836,7 +1847,16 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                         getString(R.string.tts_download_en, percent)
                 }
             }
-            status.startsWith("tts:extract:") -> getString(R.string.tts_extracting)
+            status.startsWith("tts:extract:") -> {
+                val parts = status.split(':')
+                val percent = parts.getOrNull(3)?.toIntOrNull() ?: 0
+                when {
+                    parts.getOrNull(2)?.contains("vi_VN") == true ->
+                        getString(R.string.tts_extracting_vi, percent)
+                    else ->
+                        getString(R.string.tts_extracting_en, percent)
+                }
+            }
             else -> status
         }
 
@@ -1845,7 +1865,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun normalizeSubtitleText(text: String): String {
-        return text.replace(Regex("\\s+"), " ").trim()
+        return SubtitleTextSanitizer.forTts(text)
     }
 
     private fun subtitleWordCount(text: String): Int {
@@ -1914,6 +1934,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun showSubTextDebug(text: String) {
+        if (!subtitleTtsEnabled || !subtitleTtsReady)
+            return
+
         val trimmedText = normalizeSubtitleText(text)
         if (trimmedText.isEmpty()) {
             binding.subTextDebugView.visibility = View.GONE
@@ -2108,7 +2131,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: String, metaUpdated: Boolean) {
         if (!activityIsForeground) return
         when (property) {
-            "sub-text" -> showSubTextDebug(value)
+            "sub-text" -> if (subtitleTtsEnabled) showSubTextDebug(value)
             "speed" -> updateSpeedButton()
         }
         if (metaUpdated)

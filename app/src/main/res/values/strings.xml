@@ -45,7 +45,8 @@
     <string name="error_tts_init">Subtitle TTS failed: %s</string>
     <string name="tts_download_vi">Downloading Vietnamese voice… %d%%</string>
     <string name="tts_download_en">Downloading English voice… %d%%</string>
-    <string name="tts_extracting">Extracting voice model…</string>
+    <string name="tts_extracting_vi">Extracting Vietnamese voice… %d%%</string>
+    <string name="tts_extracting_en">Extracting English voice… %d%%</string>
     <string name="notice_file_appended">File(s) appended to playlist</string>
     <string name="notice_file_play">Starting playback of file(s)</string>
     <string name="exit_warning_playlist">%d playlist items remaining.\nDo you really want to exit?</string>
