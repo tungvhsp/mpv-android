@@ -8,6 +8,9 @@
 bool acquire_jni_env(JavaVM *vm, JNIEnv **env);
 void init_methods_cache(JNIEnv *env);
 
+/** NewStringUTF-safe: mpv subtitle text may contain invalid UTF-8. */
+jstring new_string_utf8(JNIEnv *env, const char *str);
+
 #ifndef UTIL_EXTERN
 #define UTIL_EXTERN extern
 #endif

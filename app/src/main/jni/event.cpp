@@ -27,7 +27,7 @@ static void sendPropertyUpdateToJava(JNIEnv *env, mpv_event_property *prop)
             (jdouble) *(double*)prop->data);
         break;
     case MPV_FORMAT_STRING:
-        jvalue = env->NewStringUTF(*(const char**)prop->data);
+        jvalue = new_string_utf8(env, *(const char**)prop->data);
         env->CallStaticVoidMethod(mpv_MPVLib, mpv_MPVLib_eventProperty_SS, jprop, jvalue);
         break;
     default:

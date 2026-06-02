@@ -145,6 +145,7 @@ class EmbeddedSubtitleTts(context: Context) {
             try {
                 val cleanText = SubtitleTextSanitizer.forTts(text)
                 val segments = SubtitleTextSegmenter.segment(cleanText)
+                Log.d(TAG, "speak: ${cleanText.length} chars, ${segments.size} segment(s)")
                 if (segments.isEmpty())
                     return@execute
 
@@ -162,6 +163,7 @@ class EmbeddedSubtitleTts(context: Context) {
 
                     val tts = engineFor(segment.lang) ?: continue
 
+                    Log.d(TAG, "generate ${segment.lang}: ${segmentText.length} chars")
                     val audio = tts.generate(
                         text = segmentText,
                         speed = speed.coerceIn(0.5f, 2.5f),

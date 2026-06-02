@@ -3,6 +3,96 @@
 
 #include <jni.h>
 #include <stdlib.h>
+#include <string>
+
+static void utf8_append_codepoint(std::string &out, uint32_t cp)
+{
+    if (cp <= 0x7F) {
+        out.push_back((char)cp);
+    } else if (cp <= 0x7FF) {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+static std::string sanitize_utf8(const char *input)
+{
+    std::string out;
+    if (!input)
+        return out;
+
+    const unsigned char *p = (const unsigned char *)input;
+    while (*p) {
+        uint32_t cp = 0;
+        const unsigned char c = *p;
+
+        if (c < 0x80) {
+            cp = c;
+            p++;
+        } else if ((c & 0xE0) == 0xC0) {
+            if (p[1] && (p[1] & 0xC0) == 0x80 && c >= 0xC2) {
+                cp = ((c & 0x1F) << 6) | (p[1] & 0x3F);
+                if (cp >= 0x80)
+                    p += 2;
+                else
+                    cp = '?', p++;
+            } else {
+                cp = '?';
+                p++;
+            }
+        } else if ((c & 0xF0) == 0xE0) {
+            if (p[1] && p[2] && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+                (c != 0xE0 || p[1] >= 0xA0) && (c != 0xED || p[1] < 0xA0)) {
+                cp = ((c & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+                if (cp >= 0x800 && !(cp >= 0xD800 && cp <= 0xDFFF))
+                    p += 3;
+                else
+                    cp = '?', p++;
+            } else {
+                cp = '?';
+                p++;
+            }
+        } else if ((c & 0xF8) == 0xF0) {
+            if (p[1] && p[2] && p[3] && (p[1] & 0xC0) == 0x80 && (p[2] & 0xC0) == 0x80 &&
+                (p[3] & 0xC0) == 0x80 && (c != 0xF0 || p[1] >= 0x90) && (c <= 0xF3)) {
+                cp = ((c & 0x07) << 18) | ((p[1] & 0x3F) << 12) |
+                     ((p[2] & 0x3F) << 6) | (p[3] & 0x3F);
+                if (cp >= 0x10000 && cp <= 0x10FFFF)
+                    p += 4;
+                else
+                    cp = '?', p++;
+            } else {
+                cp = '?';
+                p++;
+            }
+        } else {
+            cp = '?';
+            p++;
+        }
+
+        utf8_append_codepoint(out, cp);
+    }
+
+    return out;
+}
+
+jstring new_string_utf8(JNIEnv *env, const char *str)
+{
+    if (!str)
+        return NULL;
+
+    const std::string safe = sanitize_utf8(str);
+    return env->NewStringUTF(safe.c_str());
+}
 
 bool acquire_jni_env(JavaVM *vm, JNIEnv **env)
 {

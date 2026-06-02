@@ -1902,7 +1902,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun speakSubtitle(text: String) {
-        if (!subtitleTtsEnabled)
+        if (!subtitleTtsEnabled || !subtitleTtsReady)
             return
 
         val normalizedText = normalizeSubtitleText(text)
@@ -1917,13 +1917,18 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         lastSpokenSubtitleKey = subtitleKey
 
         val speakNow: () -> Unit = {
-            val rate = speechRateForSubtitle(normalizedText)
-            embeddedSubtitleTts?.stop()
-            embeddedSubtitleTts?.speak(
-                normalizedText,
-                rate,
-                subtitleTtsVolume.coerceIn(0f, 1f),
-            )
+            try {
+                val rate = speechRateForSubtitle(normalizedText)
+                Log.d(TAG, "TTS speak: ${normalizedText.length} chars, rate=$rate")
+                embeddedSubtitleTts?.stop()
+                embeddedSubtitleTts?.speak(
+                    normalizedText,
+                    rate,
+                    subtitleTtsVolume.coerceIn(0f, 1f),
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "TTS speak failed", t)
+            }
             Unit
         }
 
@@ -2133,7 +2138,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: String, metaUpdated: Boolean) {
         if (!activityIsForeground) return
         when (property) {
-            "sub-text" -> if (subtitleTtsEnabled) showSubTextDebug(value)
+            "sub-text" -> if (subtitleTtsEnabled && subtitleTtsReady) showSubTextDebug(value)
             "speed" -> updateSpeedButton()
         }
         if (metaUpdated)
