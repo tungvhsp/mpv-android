@@ -39,6 +39,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        noCompress 'onnx', 'json'
+    }
+
     splits {
         abi {
             enable true
@@ -71,6 +75,8 @@ androidComponents {
 }
 
 dependencies {
+    implementation 'com.github.k2-fsa:sherpa-onnx:v1.13.2'
+    implementation 'org.apache.commons:commons-compress:1.26.2'
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.recyclerview:recyclerview:1.4.0'

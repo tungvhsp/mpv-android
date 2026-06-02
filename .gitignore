@@ -9,4 +9,6 @@ obj
 **/*.iml
 build/
 local.properties
+# TTS Piper models are downloaded on first use (see SubtitleTtsModels.kt)
+app/src/main/assets/tts_voice_model/
 *~
