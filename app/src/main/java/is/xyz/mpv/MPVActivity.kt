@@ -1894,7 +1894,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             return
         lastSpokenSubtitleKey = subtitleKey
 
-        val speakNow = {
+        val speakNow: () -> Unit = {
             val rate = speechRateForSubtitle(normalizedText)
             embeddedSubtitleTts?.stop()
             embeddedSubtitleTts?.speak(
@@ -1902,6 +1902,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 rate,
                 subtitleTtsVolume.coerceIn(0f, 1f),
             )
+            Unit
         }
 
         if (subtitleTtsReady) {
