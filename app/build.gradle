@@ -98,7 +98,9 @@ tasks.named("preBuild").configure {
 }
 
 dependencies {
-    implementation files(sherpaOnnxAar)
+    implementation(files(sherpaOnnxAar) {
+        builtBy("downloadSherpaOnnxAar")
+    })
     implementation 'org.apache.commons:commons-compress:1.26.2'
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     implementation 'androidx.appcompat:appcompat:1.7.1'
