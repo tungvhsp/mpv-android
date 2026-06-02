@@ -1735,11 +1735,23 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
     private fun initSubtitleTts() {
         val defaultEngine = Settings.Secure.getString(contentResolver, "tts_default_synth")
+        Log.d(TAG, "subtitle TTS requested engine from settings: $defaultEngine")
         subtitleTts = TextToSpeech(
             applicationContext,
             { status ->
                 subtitleTtsReady = status == TextToSpeech.SUCCESS
-                subtitleTts?.setPitch(1.0f)
+                if (subtitleTtsReady) {
+                    subtitleTts?.setPitch(1.0f)
+                    val runtimeDefaultEngine = subtitleTts?.defaultEngine
+                    val availableEngines = subtitleTts?.engines
+                        ?.joinToString { "${it.name}(${it.label})" }
+                    Log.d(
+                        TAG,
+                        "subtitle TTS ready. requested=$defaultEngine runtimeDefault=$runtimeDefaultEngine available=[$availableEngines]"
+                    )
+                } else {
+                    Log.w(TAG, "subtitle TTS init failed with status=$status requested=$defaultEngine")
+                }
             },
             defaultEngine
         )
@@ -1797,12 +1809,23 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
         val rate = speechRateForSubtitle(normalizedText)
         subtitleTts?.setSpeechRate(rate)
+        Log.d(
+            TAG,
+            "subtitle TTS speak: rate=$rate requested=${Settings.Secure.getString(contentResolver, "tts_default_synth")} runtimeDefault=${subtitleTts?.defaultEngine}"
+        )
         subtitleTts?.speak(
             normalizedText,
             TextToSpeech.QUEUE_ADD,
             null,
             "mpv-subtitle-${SystemClock.uptimeMillis()}"
         )
+    }
+
+    private fun subtitleTtsDebugLine(): String {
+        val requestedEngine = Settings.Secure.getString(contentResolver, "tts_default_synth") ?: "null"
+        val runtimeDefault = subtitleTts?.defaultEngine ?: "null"
+        val readyState = if (subtitleTtsReady) "ready" else "not-ready"
+        return "TTS engine: req=$requestedEngine | runtime=$runtimeDefault | $readyState"
     }
 
     private fun showSubTextDebug(text: String) {
@@ -1814,7 +1837,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             return
         }
 
-        binding.subTextDebugView.text = "TTS subtitle: $trimmedText"
+        binding.subTextDebugView.text = "TTS subtitle: $trimmedText\n${subtitleTtsDebugLine()}"
         binding.subTextDebugView.visibility = View.VISIBLE
         fadeHandler.postDelayed(hideSubTextDebugRunnable, SUB_TEXT_DEBUG_TIMEOUT)
         speakSubtitle(trimmedText)
