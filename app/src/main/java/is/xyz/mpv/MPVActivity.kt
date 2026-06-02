@@ -53,7 +53,6 @@ import androidx.media.AudioFocusRequestCompat
 import androidx.media.AudioManagerCompat
 import java.io.File
 import java.lang.IllegalArgumentException
-import java.util.Locale
 import kotlin.math.roundToInt
 
 typealias ActivityResultCallback = (Int, Intent?) -> Unit
@@ -1735,15 +1734,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
 
     private fun initSubtitleTts() {
         subtitleTts = TextToSpeech(applicationContext) { status ->
-            if (status != TextToSpeech.SUCCESS) {
-                subtitleTtsReady = false
-                return@TextToSpeech
-            }
-
-            val result = subtitleTts?.setLanguage(Locale("vi", "VN"))
-            subtitleTtsReady =
-                result != TextToSpeech.LANG_MISSING_DATA &&
-                result != TextToSpeech.LANG_NOT_SUPPORTED
+            subtitleTtsReady = status == TextToSpeech.SUCCESS
             subtitleTts?.setPitch(1.0f)
         }
     }
