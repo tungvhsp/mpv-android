@@ -17,6 +17,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.util.Log
 import android.media.AudioManager
@@ -83,7 +84,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var audioFocusRestore: () -> Unit = {}
     private var subtitleTts: TextToSpeech? = null
     private var subtitleTtsReady = false
-    private var subtitleTtsEnabled = true
+    private var subtitleTtsEnabled = false
+    private var subtitleTtsVolume = 1.0f
     private var currentSubStart: Double? = null
     private var currentSubEnd: Double? = null
     private var lastSpokenSubtitleKey = ""
@@ -226,6 +228,18 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             cycleDecoderBtn.setOnLongClickListener { pickDecoder(); true }
 
             playbackSeekbar.setOnSeekBarChangeListener(seekBarChangeListener)
+            subtitleTtsVolumeLabel.text = getString(R.string.ui_tts_volume)
+            subtitleTtsVolumeSeekbar.max = 100
+            subtitleTtsVolumeSeekbar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    subtitleTtsVolume = (progress.coerceIn(0, 100)) / 100f
+                    if (fromUser)
+                        writeSettings()
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
         }
 
         player.setOnTouchListener { _, e ->
@@ -522,8 +536,11 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         this.playlistExitWarning = prefs.getBoolean("playlist_exit_warning", true)
         this.newIntentReplace = prefs.getBoolean("new_intent_replace", false)
         this.smoothSeekGesture = prefs.getBoolean("seek_gesture_smooth", false)
-        this.subtitleTtsEnabled = prefs.getBoolean("subtitle_tts_enabled", true)
-        updateSubtitleTtsButton()
+        this.subtitleTtsEnabled = prefs.getBoolean("subtitle_tts_enabled", false)
+        val volumePercent = prefs.getInt("subtitle_tts_volume_percent", 100).coerceIn(0, 100)
+        this.subtitleTtsVolume = volumePercent / 100f
+        binding.subtitleTtsVolumeSeekbar.progress = volumePercent
+        updateSubtitleTtsUi()
     }
 
     private fun writeSettings() {
@@ -532,6 +549,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         with (prefs.edit()) {
             putBoolean("use_time_remaining", useTimeRemaining)
             putBoolean("subtitle_tts_enabled", subtitleTtsEnabled)
+            putInt("subtitle_tts_volume_percent", (subtitleTtsVolume * 100f).toInt().coerceIn(0, 100))
             commit()
         }
     }
@@ -1738,16 +1756,18 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.cycleSpeedBtn.text = getString(R.string.ui_speed, psc.speed)
     }
 
-    private fun updateSubtitleTtsButton() {
+    private fun updateSubtitleTtsUi() {
         val textRes = if (subtitleTtsEnabled) R.string.ui_tts_on else R.string.ui_tts_off
         binding.toggleSubtitleTtsBtn.text = getString(textRes)
+        binding.toggleSubtitleTtsBtn.setTextColor(if (subtitleTtsEnabled) Color.GREEN else Color.WHITE)
+        binding.subtitleTtsVolumeGroup.visibility = if (subtitleTtsEnabled) View.VISIBLE else View.GONE
     }
 
     private fun toggleSubtitleTts() {
         subtitleTtsEnabled = !subtitleTtsEnabled
         if (!subtitleTtsEnabled)
             subtitleTts?.stop()
-        updateSubtitleTtsButton()
+        updateSubtitleTtsUi()
         writeSettings()
     }
 
@@ -1807,9 +1827,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             .coerceAtLeast(MIN_SUBTITLE_TTS_DURATION_SEC)
         val rate = wordCount / (VIETNAMESE_WORDS_PER_SECOND * availableDuration)
 
-        // Keep "normal" pace for short text even if subtitle duration is long.
-        // (i.e. do not slow down below DEFAULT_SUBTITLE_SPEECH_RATE)
-        return rate.toFloat().coerceIn(DEFAULT_SUBTITLE_SPEECH_RATE, MAX_SUBTITLE_SPEECH_RATE)
+        return rate.toFloat().coerceIn(MIN_SUBTITLE_SPEECH_RATE, MAX_SUBTITLE_SPEECH_RATE)
     }
 
     private fun speakSubtitle(text: String) {
@@ -1835,10 +1853,13 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             TAG,
             "subtitle TTS speak: rate=$rate requested=${Settings.Secure.getString(contentResolver, "tts_default_synth")} runtimeDefault=${subtitleTts?.defaultEngine}"
         )
+        val params = Bundle().apply {
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, subtitleTtsVolume.coerceIn(0f, 1f))
+        }
         subtitleTts?.speak(
             normalizedText,
             TextToSpeech.QUEUE_FLUSH,
-            null,
+            params,
             "mpv-subtitle-${SystemClock.uptimeMillis()}"
         )
     }
