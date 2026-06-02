@@ -154,6 +154,14 @@
                     app:srcCompat="@drawable/ic_subtitles_black_24dp"
                     app:tint="@color/tint_normal" />
 
+                <Button
+                    android:id="@+id/toggleSubtitleTtsBtn"
+                    style="?buttonBarButtonStyle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@android:color/white"
+                    tools:text="TTS ON" />
+
                 <ImageButton
                     android:id="@+id/playBtn"
                     style="?buttonBarButtonStyle"
@@ -213,8 +221,7 @@
             android:textColor="#00FF00"
             android:textSize="18sp"
             android:visibility="gone"
-            tools:text="TTS subtitle: Hello"
-            tools:visibility="visible" />
+            tools:text="TTS subtitle: Hello" />
 
         <TextView
             android:id="@+id/gestureTextView"
