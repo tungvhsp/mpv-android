@@ -1773,7 +1773,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         subtitleTtsEnabled = !subtitleTtsEnabled
         if (!subtitleTtsEnabled) {
             embeddedSubtitleTts?.stop()
+            embeddedSubtitleTts?.releaseEngines()
             stopSubtitleTextPolling()
+            lastSpokenSubtitleKey = ""
         } else {
             prepareEmbeddedSubtitleTts(showErrors = true)
         }
@@ -1792,11 +1794,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun onSubtitleTtsModelsReady() {
         ensureSubtitleTextObservation()
         startSubtitleTextPolling()
+        lastSpokenSubtitleKey = ""
         pollSubtitleTextForTts()
-        // Defer heavy ONNX load so install UI can finish without a native crash.
-        fadeHandler.postDelayed({
-            embeddedSubtitleTts?.warmupEngines()
-        }, 800L)
     }
 
     private fun startSubtitleTextPolling() {
@@ -1826,8 +1825,16 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun initSubtitleTts() {
-        embeddedSubtitleTts = EmbeddedSubtitleTts(applicationContext)
-        if (subtitleTtsEnabled) {
+        embeddedSubtitleTts = EmbeddedSubtitleTts(applicationContext).also { engine ->
+            engine.onEngineError = { message -> showToast(message) }
+        }
+        if (!subtitleTtsEnabled)
+            return
+
+        if (embeddedSubtitleTts?.hasModelsOnDisk() == true) {
+            subtitleTtsReady = true
+            onSubtitleTtsModelsReady()
+        } else {
             prepareEmbeddedSubtitleTts(showErrors = false)
         }
     }
@@ -1840,6 +1847,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (engine.isReady()) {
             subtitleTtsReady = true
             subtitleTtsPreparing = false
+            lastSpokenSubtitleKey = ""
             onSubtitleTtsModelsReady()
             pendingSubtitleSpeak?.invoke()
             pendingSubtitleSpeak = null

@@ -48,7 +48,7 @@
     <string name="tts_extracting_vi">Extracting Vietnamese voice… %d%%</string>
     <string name="tts_extracting_en">Extracting English voice… %d%%</string>
     <string name="tts_ready">Subtitle TTS ready</string>
-    <string name="tts_warming_up">Loading voice engine…</string>
+    <string name="tts_loading_voice">Loading voice (first subtitle may take 15–30s)…</string>
     <string name="notice_file_appended">File(s) appended to playlist</string>
     <string name="notice_file_play">Starting playback of file(s)</string>
     <string name="exit_warning_playlist">%d playlist items remaining.\nDo you really want to exit?</string>

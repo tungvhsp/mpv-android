@@ -67,6 +67,8 @@ internal object SubtitleTtsModels {
         Log.i(TAG, "TTS models installed")
     }
 
+    fun isInstalled(context: Context): Boolean = areAllModelsReady(context)
+
     private fun areAllModelsReady(context: Context): Boolean {
         return isModelReady(viModelDir(context), VI_ONNX) &&
             isModelReady(enModelDir(context), EN_ONNX)

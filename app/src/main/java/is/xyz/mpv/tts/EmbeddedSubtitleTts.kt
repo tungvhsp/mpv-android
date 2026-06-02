@@ -1,16 +1,19 @@
 package `is`.xyz.mpv.tts
 
 import android.content.Context
-import android.os.Build
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineTts
-import com.k2fsa.sherpa.onnx.getOfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -24,7 +27,10 @@ class EmbeddedSubtitleTts(context: Context) {
     private var enTts: OfflineTts? = null
 
     @Volatile
-    private var modelsInstalled = false
+    private var activeLang: SubtitleTextSegmenter.Lang? = null
+
+    @Volatile
+    private var modelsInstalled = SubtitleTtsModels.isInstalled(appContext)
 
     @Volatile
     private var preparing = false
@@ -38,6 +44,20 @@ class EmbeddedSubtitleTts(context: Context) {
     private var audioTrack: AudioTrack? = null
     private var audioTrackSampleRate = 0
     private val usePcmFloat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+
+    /** Called on the main thread when engine load or synth fails. */
+    var onEngineError: ((String) -> Unit)? = null
+
+    init {
+        // Touch JNI once at startup (cheaper than during first subtitle line).
+        try {
+            Class.forName("com.k2fsa.sherpa.onnx.OfflineTts")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Sherpa ONNX classes missing", t)
+        }
+    }
+
+    fun hasModelsOnDisk(): Boolean = modelsInstalled
 
     fun isReady(): Boolean = modelsInstalled
 
@@ -68,6 +88,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 SubtitleTtsModels.ensureInstalled(appContext) { status ->
                     mainHandler.post { onProgress?.invoke(status) }
                 }
+                modelsInstalled = true
                 finishPrepare(success = true, error = null)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to prepare embedded TTS", t)
@@ -76,23 +97,11 @@ class EmbeddedSubtitleTts(context: Context) {
         }
     }
 
-    /** Load ONNX engines off the download path to reduce OOM/crash right after extract. */
-    fun warmupEngines() {
-        if (!modelsInstalled)
-            return
+    /** Unload ONNX from RAM; model files stay on disk. */
+    fun releaseEngines() {
         worker.execute {
-            try {
-                ensureViEngine()
-                Log.i(TAG, "VI TTS engine warmed up")
-            } catch (t: Throwable) {
-                Log.e(TAG, "VI engine warmup failed", t)
-            }
-            try {
-                ensureEnEngine()
-                Log.i(TAG, "EN TTS engine warmed up")
-            } catch (t: Throwable) {
-                Log.e(TAG, "EN engine warmup failed", t)
-            }
+            releaseAllEngines()
+            Log.i(TAG, "TTS engines released from memory")
         }
     }
 
@@ -100,8 +109,6 @@ class EmbeddedSubtitleTts(context: Context) {
         val callbacks: List<(Boolean, String?) -> Unit>
         synchronized(this) {
             preparing = false
-            if (success)
-                modelsInstalled = true
             callbacks = prepareCallbacks.toList()
             prepareCallbacks.clear()
         }
@@ -111,64 +118,93 @@ class EmbeddedSubtitleTts(context: Context) {
         }
     }
 
+    private fun releaseAllEngines() {
+        viTts?.free()
+        enTts?.free()
+        viTts = null
+        enTts = null
+        activeLang = null
+    }
+
+    private fun validateModelDir(modelDir: File, onnxFileName: String) {
+        val onnx = File(modelDir, onnxFileName)
+        val tokens = File(modelDir, "tokens.txt")
+        val espeak = File(modelDir, "espeak-ng-data")
+        if (!onnx.isFile)
+            throw IllegalStateException("Missing model: ${onnx.absolutePath}")
+        if (!tokens.isFile)
+            throw IllegalStateException("Missing tokens: ${tokens.absolutePath}")
+        if (!espeak.isDirectory)
+            throw IllegalStateException("Missing espeak-ng-data: ${espeak.absolutePath}")
+    }
+
+    private fun buildVitsConfig(modelDir: File, onnxFileName: String): OfflineTtsConfig {
+        val dir = modelDir.absolutePath
+        return OfflineTtsConfig(
+            model = OfflineTtsModelConfig(
+                vits = OfflineTtsVitsModelConfig(
+                    model = "$dir/$onnxFileName",
+                    tokens = "$dir/tokens.txt",
+                    dataDir = "$dir/espeak-ng-data",
+                ),
+                numThreads = 1,
+                debug = false,
+                provider = "cpu",
+            ),
+        )
+    }
+
     private fun ensureViEngine(): OfflineTts {
         viTts?.let { return it }
 
-        val viDir = SubtitleTtsModels.viModelDir(appContext).absolutePath
-        val engine = OfflineTts(
-            config = getOfflineTtsConfig(
-                modelDir = viDir,
-                modelName = SubtitleTtsModels.VI_ONNX,
-                acousticModelName = "",
-                vocoder = "",
-                voices = "",
-                lexicon = "",
-                dataDir = "$viDir/espeak-ng-data",
-                dictDir = "",
-                ruleFsts = "",
-                ruleFars = "",
-                numThreads = 1,
-            ),
-        )
+        val modelDir = SubtitleTtsModels.viModelDir(appContext)
+        validateModelDir(modelDir, SubtitleTtsModels.VI_ONNX)
+        notifyError(appContext.getString(
+            `is`.xyz.mpv.R.string.tts_loading_voice,
+        ))
+        Log.i(TAG, "Loading VI TTS engine...")
+        val engine = OfflineTts(config = buildVitsConfig(modelDir, SubtitleTtsModels.VI_ONNX))
         engine.sampleRate()
         viTts = engine
+        Log.i(TAG, "VI TTS engine ready @ ${engine.sampleRate()}Hz")
         return engine
     }
 
     private fun ensureEnEngine(): OfflineTts {
         enTts?.let { return it }
 
-        val enDir = SubtitleTtsModels.enModelDir(appContext).absolutePath
-        val engine = OfflineTts(
-            config = getOfflineTtsConfig(
-                modelDir = enDir,
-                modelName = SubtitleTtsModels.EN_ONNX,
-                acousticModelName = "",
-                vocoder = "",
-                voices = "",
-                lexicon = "",
-                dataDir = "$enDir/espeak-ng-data",
-                dictDir = "",
-                ruleFsts = "",
-                ruleFars = "",
-                numThreads = 1,
-            ),
-        )
+        val modelDir = SubtitleTtsModels.enModelDir(appContext)
+        validateModelDir(modelDir, SubtitleTtsModels.EN_ONNX)
+        notifyError(appContext.getString(
+            `is`.xyz.mpv.R.string.tts_loading_voice,
+        ))
+        Log.i(TAG, "Loading EN TTS engine...")
+        val engine = OfflineTts(config = buildVitsConfig(modelDir, SubtitleTtsModels.EN_ONNX))
         engine.sampleRate()
         enTts = engine
+        Log.i(TAG, "EN TTS engine ready @ ${engine.sampleRate()}Hz")
         return engine
     }
 
     private fun engineFor(lang: SubtitleTextSegmenter.Lang): OfflineTts? {
         return try {
+            // Only one Piper model in RAM at a time (avoids OOM / native crash on mid-range phones).
+            if (activeLang != null && activeLang != lang)
+                releaseAllEngines()
+            activeLang = lang
             when (lang) {
                 SubtitleTextSegmenter.Lang.EN -> ensureEnEngine()
                 SubtitleTextSegmenter.Lang.VI -> ensureViEngine()
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to load ${lang.name} TTS engine", t)
+            notifyError("TTS engine (${lang.name}): ${t.message ?: "load failed"}")
             null
         }
+    }
+
+    private fun notifyError(message: String) {
+        mainHandler.post { onEngineError?.invoke(message) }
     }
 
     fun speak(text: String, speed: Float, volume: Float) {
@@ -185,13 +221,12 @@ class EmbeddedSubtitleTts(context: Context) {
             try {
                 val cleanText = SubtitleTextSanitizer.forTts(text)
                 val segments = SubtitleTextSegmenter.segment(cleanText)
-                Log.d(TAG, "speak: ${cleanText.length} chars, ${segments.size} segment(s)")
+                Log.i(TAG, "speak: ${cleanText.length} chars, ${segments.size} segment(s)")
                 if (segments.isEmpty())
                     return@execute
 
-                val viEngine = engineFor(SubtitleTextSegmenter.Lang.VI) ?: return@execute
                 val samples = ArrayList<Float>(4096)
-                var sampleRate = viEngine.sampleRate()
+                var sampleRate = 22050
 
                 for (segment in segments) {
                     if (stopRequested || generation != playGeneration.get())
@@ -203,13 +238,15 @@ class EmbeddedSubtitleTts(context: Context) {
 
                     val tts = engineFor(segment.lang) ?: continue
 
-                    Log.d(TAG, "generate ${segment.lang}: ${segmentText.length} chars")
+                    Log.i(TAG, "generate ${segment.lang}: \"${segmentText.take(40)}\"")
                     val audio = tts.generate(
                         text = segmentText,
                         speed = speed.coerceIn(0.5f, 2.5f),
                     )
-                    if (audio.samples.isEmpty())
+                    if (audio.samples.isEmpty()) {
+                        Log.w(TAG, "generate ${segment.lang} returned empty audio")
                         continue
+                    }
 
                     sampleRate = audio.sampleRate
                     for (s in audio.samples)
@@ -217,7 +254,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 }
 
                 if (stopRequested || generation != playGeneration.get() || samples.isEmpty()) {
-                    Log.w(TAG, "speak produced no audio (${samples.size} samples)")
+                    Log.w(TAG, "speak produced no audio")
                     return@execute
                 }
 
@@ -225,8 +262,10 @@ class EmbeddedSubtitleTts(context: Context) {
                 playSamples(samples.toFloatArray(), sampleRate, volume.coerceIn(0f, 1f), generation)
             } catch (e: Exception) {
                 Log.e(TAG, "speak failed for \"$text\"", e)
+                notifyError("TTS: ${e.message ?: "speak failed"}")
             } catch (e: Error) {
                 Log.e(TAG, "speak native error for \"$text\"", e)
+                notifyError("TTS native error")
             }
         }
     }
@@ -242,13 +281,7 @@ class EmbeddedSubtitleTts(context: Context) {
 
     fun shutdown() {
         stop()
-        worker.execute {
-            viTts?.free()
-            enTts?.free()
-            viTts = null
-            enTts = null
-            modelsInstalled = false
-        }
+        worker.execute { releaseAllEngines() }
         worker.shutdown()
         mainHandler.post {
             audioTrack?.release()
@@ -259,8 +292,8 @@ class EmbeddedSubtitleTts(context: Context) {
 
     fun statusLine(): String {
         return when {
-            modelsInstalled && viTts != null -> "TTS: Sherpa embedded (VI+EN)"
-            modelsInstalled -> "TTS: models OK, loading voice..."
+            viTts != null || enTts != null -> "TTS: voice loaded"
+            modelsInstalled -> "TTS: models OK"
             preparing -> "TTS: preparing models..."
             else -> "TTS: not ready"
         }
@@ -279,6 +312,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 }
 
                 val track = obtainAudioTrack(sampleRate)
+                track.setVolume(1.0f)
                 track.play()
                 val chunkSize = 4096
                 var offset = 0
@@ -298,6 +332,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 }
             } catch (t: Throwable) {
                 Log.e(TAG, "AudioTrack playback failed", t)
+                notifyError("TTS playback failed")
             }
         }
     }
