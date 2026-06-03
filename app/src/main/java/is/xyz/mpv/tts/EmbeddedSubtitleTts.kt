@@ -10,9 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineTts
-import com.k2fsa.sherpa.onnx.OfflineTtsConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
-import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
+import com.k2fsa.sherpa.onnx.getOfflineTtsConfig
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -48,6 +46,11 @@ class EmbeddedSubtitleTts(context: Context) {
 
     /** Called on the main thread when engine load or synth fails. */
     var onEngineError: ((String) -> Unit)? = null
+
+    /** Pause video before loading ONNX to reduce OOM/native crashes. */
+    var onRequestPauseForLoad: (() -> Unit)? = null
+
+    var onRequestResumeAfterLoad: (() -> Unit)? = null
 
     init {
         // Touch JNI once at startup (cheaper than during first subtitle line).
@@ -141,22 +144,6 @@ class EmbeddedSubtitleTts(context: Context) {
             throw IllegalStateException("Missing espeak-ng-data: ${espeak.absolutePath}")
     }
 
-    private fun buildVitsConfig(modelDir: File, onnxFileName: String): OfflineTtsConfig {
-        val dir = modelDir.absolutePath
-        return OfflineTtsConfig(
-            model = OfflineTtsModelConfig(
-                vits = OfflineTtsVitsModelConfig(
-                    model = "$dir/$onnxFileName",
-                    tokens = "$dir/tokens.txt",
-                    dataDir = "$dir/espeak-ng-data",
-                ),
-                numThreads = 1,
-                debug = false,
-                provider = "cpu",
-            ),
-        )
-    }
-
     /** Caller must hold [engineLock]. */
     private fun ensureViEngine(): OfflineTts {
         viTts?.let { return it }
@@ -166,8 +153,23 @@ class EmbeddedSubtitleTts(context: Context) {
         notifyError(appContext.getString(
             `is`.xyz.mpv.R.string.tts_loading_voice,
         ))
+        requestPauseForLoad()
         Log.i(TAG, "Loading VI TTS engine...")
-        val engine = OfflineTts(config = buildVitsConfig(modelDir, SubtitleTtsModels.VI_ONNX))
+        val engine = OfflineTts(
+            config = getOfflineTtsConfig(
+                modelDir = modelDir.absolutePath,
+                modelName = SubtitleTtsModels.VI_ONNX,
+                acousticModelName = "",
+                vocoder = "",
+                voices = "",
+                lexicon = "",
+                dataDir = "${modelDir.absolutePath}/espeak-ng-data",
+                dictDir = "",
+                ruleFsts = "",
+                ruleFars = "",
+                numThreads = 1,
+            ),
+        )
         engine.sampleRate()
         viTts = engine
         Log.i(TAG, "VI TTS engine ready @ ${engine.sampleRate()}Hz")
@@ -183,8 +185,23 @@ class EmbeddedSubtitleTts(context: Context) {
         notifyError(appContext.getString(
             `is`.xyz.mpv.R.string.tts_loading_voice,
         ))
+        requestPauseForLoad()
         Log.i(TAG, "Loading EN TTS engine...")
-        val engine = OfflineTts(config = buildVitsConfig(modelDir, SubtitleTtsModels.EN_ONNX))
+        val engine = OfflineTts(
+            config = getOfflineTtsConfig(
+                modelDir = modelDir.absolutePath,
+                modelName = SubtitleTtsModels.EN_ONNX,
+                acousticModelName = "",
+                vocoder = "",
+                voices = "",
+                lexicon = "",
+                dataDir = "${modelDir.absolutePath}/espeak-ng-data",
+                dictDir = "",
+                ruleFsts = "",
+                ruleFars = "",
+                numThreads = 1,
+            ),
+        )
         engine.sampleRate()
         enTts = engine
         Log.i(TAG, "EN TTS engine ready @ ${engine.sampleRate()}Hz")
@@ -212,6 +229,14 @@ class EmbeddedSubtitleTts(context: Context) {
 
     private fun notifyError(message: String) {
         mainHandler.post { onEngineError?.invoke(message) }
+    }
+
+    private fun requestPauseForLoad() {
+        mainHandler.post { onRequestPauseForLoad?.invoke() }
+    }
+
+    private fun requestResumeAfterLoad() {
+        mainHandler.post { onRequestResumeAfterLoad?.invoke() }
     }
 
     fun speak(text: String, speed: Float, volume: Float) {
@@ -267,6 +292,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 }
 
                 Log.i(TAG, "playing ${samples.size} samples @ ${sampleRate}Hz")
+                requestResumeAfterLoad()
                 playSamples(samples.toFloatArray(), sampleRate, volume.coerceIn(0f, 1f), generation)
             } catch (e: Exception) {
                 Log.e(TAG, "speak failed for \"$text\"", e)

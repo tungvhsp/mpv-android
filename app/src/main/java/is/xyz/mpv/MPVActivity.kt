@@ -24,7 +24,6 @@ import android.media.AudioManager
 import android.net.Uri
 import android.os.*
 import android.preference.PreferenceManager.getDefaultSharedPreferences
-import `is`.xyz.mpv.MPVLib.MpvFormat.MPV_FORMAT_STRING
 import `is`.xyz.mpv.tts.EmbeddedSubtitleTts
 import `is`.xyz.mpv.tts.SubtitleTextSanitizer
 import android.support.v4.media.session.MediaSessionCompat
@@ -87,14 +86,15 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var subtitleTtsReady = false
     private var subtitleTtsPreparing = false
     private var pendingSubtitleSpeak: (() -> Unit)? = null
-    private var subtitleTextObserved = false
     private var subtitleTtsEnabled = false
+    private var pausedForTtsLoad = false
+    private var resumeAfterTtsLoad = false
     private var subtitleTtsVolume = 1.0f
     private var currentSubStart: Double? = null
     private var currentSubEnd: Double? = null
     private var lastSpokenSubtitleKey = ""
     private var pendingSubtitleTtsText: String? = null
-    private val subtitleTextPollRunnable = Runnable { pollSubtitleTextForTts() }
+    private val readSubTextForTtsRunnable = Runnable { readSubTextAndSpeak() }
     private val subtitleTtsDebounceRunnable = Runnable {
         val text = pendingSubtitleTtsText ?: return@Runnable
         pendingSubtitleTtsText = null
@@ -397,8 +397,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // take the background service with us
         stopServiceRunnable.run()
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
-        stopSubtitleTextPolling()
+        fadeHandler.removeCallbacks(readSubTextForTtsRunnable)
         fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
+        resumePlaybackAfterTtsLoad()
         embeddedSubtitleTts?.shutdown()
         embeddedSubtitleTts = null
         subtitleTtsReady = false
@@ -1784,8 +1785,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (!subtitleTtsEnabled) {
             embeddedSubtitleTts?.stop()
             embeddedSubtitleTts?.releaseEngines()
-            stopSubtitleTextPolling()
+            fadeHandler.removeCallbacks(readSubTextForTtsRunnable)
             fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
+            resumePlaybackAfterTtsLoad()
             lastSpokenSubtitleKey = ""
         } else {
             prepareEmbeddedSubtitleTts(showErrors = true)
@@ -1794,71 +1796,67 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         writeSettings()
     }
 
-    private fun ensureSubtitleTextObservation() {
-        if (!subtitleTtsEnabled || !subtitleTtsReady || subtitleTextObserved)
-            return
-        MPVLib.observeProperty("sub-text", MPV_FORMAT_STRING)
-        subtitleTextObserved = true
-        Log.d(TAG, "Observing sub-text for embedded TTS")
-    }
-
     private fun onSubtitleTtsModelsReady() {
-        updateSubtitleTtsPipeline()
+        lastSpokenSubtitleKey = ""
+        Log.i(TAG, "Subtitle TTS pipeline armed (sub-start driven, no sub-text observe)")
     }
 
     private fun isSubtitleTrackActive(): Boolean = player.sid >= 0
 
-    private fun updateSubtitleTtsPipeline() {
-        if (!subtitleTtsEnabled || !subtitleTtsReady) {
-            stopSubtitleTextPolling()
-            return
-        }
-        if (!isSubtitleTrackActive()) {
-            stopSubtitleTextPolling()
-            embeddedSubtitleTts?.stop()
-            return
-        }
-        ensureSubtitleTextObservation()
-        startSubtitleTextPolling()
-        lastSpokenSubtitleKey = ""
-    }
-
     private fun onSubtitleTrackChanged() {
         lastSpokenSubtitleKey = ""
         fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
+        fadeHandler.removeCallbacks(readSubTextForTtsRunnable)
         pendingSubtitleTtsText = null
-        updateSubtitleTtsPipeline()
-    }
-
-    private fun startSubtitleTextPolling() {
-        if (!subtitleTtsEnabled || !subtitleTtsReady)
-            return
-        fadeHandler.removeCallbacks(subtitleTextPollRunnable)
-        fadeHandler.postDelayed(subtitleTextPollRunnable, 800L)
-    }
-
-    private fun stopSubtitleTextPolling() {
-        fadeHandler.removeCallbacks(subtitleTextPollRunnable)
-    }
-
-    private fun pollSubtitleTextForTts() {
-        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive()) {
-            stopSubtitleTextPolling()
-            return
+        if (!isSubtitleTrackActive()) {
+            embeddedSubtitleTts?.stop()
+            resumePlaybackAfterTtsLoad()
         }
+    }
+
+    private fun scheduleReadSubTextForTts() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive())
+            return
+        fadeHandler.removeCallbacks(readSubTextForTtsRunnable)
+        fadeHandler.postDelayed(readSubTextForTtsRunnable, 350L)
+    }
+
+    private fun readSubTextAndSpeak() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive())
+            return
         try {
-            val text = readCurrentSubtitleText()
+            val text = MPVLib.getPropertyString("sub-text")
             if (!text.isNullOrBlank())
                 handleSubtitleTextForTts(text)
         } catch (t: Throwable) {
-            Log.e(TAG, "subtitle text poll failed", t)
+            Log.e(TAG, "read sub-text failed", t)
         }
-        fadeHandler.postDelayed(subtitleTextPollRunnable, 800L)
+    }
+
+    private fun pausePlaybackForTtsLoad() {
+        if (pausedForTtsLoad)
+            return
+        resumeAfterTtsLoad = player.paused != true
+        if (resumeAfterTtsLoad) {
+            player.paused = true
+            pausedForTtsLoad = true
+        }
+    }
+
+    private fun resumePlaybackAfterTtsLoad() {
+        if (!pausedForTtsLoad)
+            return
+        if (resumeAfterTtsLoad)
+            player.paused = false
+        pausedForTtsLoad = false
+        resumeAfterTtsLoad = false
     }
 
     private fun initSubtitleTts() {
         embeddedSubtitleTts = EmbeddedSubtitleTts(applicationContext).also { engine ->
             engine.onEngineError = { message -> showToast(message) }
+            engine.onRequestPauseForLoad = { pausePlaybackForTtsLoad() }
+            engine.onRequestResumeAfterLoad = { resumePlaybackAfterTtsLoad() }
         }
         if (!subtitleTtsEnabled)
             return
@@ -1911,8 +1909,6 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             if (ok) {
                 onSubtitleTtsModelsReady()
                 pendingSubtitleSpeak?.invoke()
-            } else {
-                stopSubtitleTextPolling()
             }
             pendingSubtitleSpeak = null
         }
@@ -1952,20 +1948,6 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.subTextDebugView.visibility = View.VISIBLE
     }
 
-    private fun readCurrentSubtitleText(): String? {
-        val candidates = arrayOf(
-            "sub-text",
-            "sub-text/ass",
-            "sub-text-ass",
-        )
-        for (prop in candidates) {
-            val value = MPVLib.getPropertyString(prop)
-            if (!value.isNullOrBlank())
-                return value
-        }
-        return null
-    }
-
     private fun normalizeSubtitleText(text: String): String {
         return SubtitleTextSanitizer.forTts(text)
     }
@@ -1978,8 +1960,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun subtitleDurationSec(): Double? {
-        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
-        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+        val start = currentSubStart
+        val end = currentSubEnd
         if (start == null || end == null)
             return null
 
@@ -2009,8 +1991,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (normalizedText.isEmpty())
             return
 
-        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
-        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+        val start = currentSubStart
+        val end = currentSubEnd
         val subtitleKey = "$start|$end|$normalizedText"
         if (subtitleKey == lastSpokenSubtitleKey)
             return
@@ -2038,10 +2020,6 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         }
 
         prepareEmbeddedSubtitleTts(showErrors = true, onReady = speakNow)
-    }
-
-    private fun showSubTextDebug(text: String) {
-        handleSubtitleTextForTts(text)
     }
 
     private fun handleSubtitleTextForTts(text: String) {
@@ -2230,7 +2208,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         if (!activityIsForeground) return
         when (property) {
             "duration/full" -> updatePlaybackDuration(psc.durationSec)
-            "sub-start/full" -> currentSubStart = value
+            "sub-start/full" -> {
+                currentSubStart = value
+                scheduleReadSubTextForTts()
+            }
             "sub-end/full" -> currentSubEnd = value
             "video-params/aspect", "video-params/rotate" -> {
                 updateOrientation()
@@ -2242,8 +2223,6 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: String, metaUpdated: Boolean) {
         if (!activityIsForeground) return
         when (property) {
-            "sub-text" -> if (subtitleTtsEnabled && subtitleTtsReady && isSubtitleTrackActive())
-                showSubTextDebug(value)
             "speed" -> updateSpeedButton()
         }
         if (metaUpdated)
