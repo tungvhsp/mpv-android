@@ -39,10 +39,6 @@ android {
         buildConfig = true
     }
 
-    androidResources {
-        noCompress 'onnx', 'json'
-    }
-
     splits {
         abi {
             enable true
@@ -74,34 +70,7 @@ androidComponents {
     }
 }
 
-def sherpaOnnxAar = file("$projectDir/libs/sherpa-onnx-1.13.2.aar")
-def sherpaOnnxAarUrl =
-        "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.2/sherpa-onnx-1.13.2.aar"
-
-tasks.register("downloadSherpaOnnxAar") {
-    outputs.file(sherpaOnnxAar)
-    doLast {
-        if (sherpaOnnxAar.exists())
-            return
-        sherpaOnnxAar.parentFile.mkdirs()
-        println("Downloading $sherpaOnnxAarUrl")
-        sherpaOnnxAar.withOutputStream { output ->
-            new URL(sherpaOnnxAarUrl).withInputStream { input ->
-                input.transferTo(output)
-            }
-        }
-    }
-}
-
-tasks.named("preBuild").configure {
-    dependsOn("downloadSherpaOnnxAar")
-}
-
 dependencies {
-    implementation(files(sherpaOnnxAar) {
-        builtBy("downloadSherpaOnnxAar")
-    })
-    implementation 'org.apache.commons:commons-compress:1.26.2'
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     implementation 'androidx.appcompat:appcompat:1.7.1'
     implementation 'androidx.recyclerview:recyclerview:1.4.0'

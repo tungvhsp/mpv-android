@@ -188,35 +188,6 @@
                     tools:text="1.00X" />
 
             </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/subtitle_tts_volume_group"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_marginEnd="8dp"
-                android:layout_marginBottom="8dp"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:visibility="gone">
-
-                <TextView
-                    android:id="@+id/subtitleTtsVolumeLabel"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:paddingEnd="8dp"
-                    android:textColor="@android:color/white"
-                    android:textSize="14sp"
-                    tools:text="TTS volume" />
-
-                <SeekBar
-                    android:id="@+id/subtitleTtsVolumeSeekbar"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:max="100"
-                    android:progress="100" />
-            </LinearLayout>
         </LinearLayout>
 
         <TextView
