@@ -30,6 +30,8 @@
     <string name="ui_speed">%.2fx</string>
     <string name="ui_tts_on">TTS ON</string>
     <string name="ui_tts_off">TTS (off)</string>
+    <string name="ui_tts_volume">TTS volume</string>
+    <string name="ui_tts_lead_ahead">Read ahead: %.1fs</string>
     <string name="ui_chapter_fallback">Chapter %1$d (%2$s)</string>
     <string name="ui_chapter">%1$s (%2$s)</string>
     <string name="ui_track">#%d</string>

@@ -17,6 +17,7 @@ import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.drawable.Icon
 import android.util.Log
 import android.media.AudioManager
@@ -84,9 +85,17 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var subtitleTts: TextToSpeech? = null
     private var subtitleTtsReady = false
     private var subtitleTtsEnabled = true
+    private var subtitleTtsVolume = 0.6f
+    private var subtitleTtsLeadMs = DEFAULT_SUBTITLE_TTS_LEAD_MS
     private var currentSubStart: Double? = null
     private var currentSubEnd: Double? = null
     private var lastSpokenSubtitleKey = ""
+    private var pendingSubtitleSpeakRunnable: Runnable? = null
+    private var pendingDeferredSpeakRunnable: Runnable? = null
+    private var lastSpeakWallTimeMs = 0L
+    private var lastSpeakEstimatedDurationMs = 0L
+    private var lastSpeakEndTime: Double? = null
+    private var lastCheckedTimePosSec = -1.0
 
     private val psc = Utils.PlaybackStateCache()
     private var mediaSession: MediaSessionCompat? = null
@@ -226,6 +235,38 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             cycleDecoderBtn.setOnLongClickListener { pickDecoder(); true }
 
             playbackSeekbar.setOnSeekBarChangeListener(seekBarChangeListener)
+
+            subtitleTtsVolumeLabel.text = getString(R.string.ui_tts_volume)
+            subtitleTtsVolumeSeekbar.max = 100
+            val ttsVolumeOrange = ColorStateList.valueOf(ContextCompat.getColor(this@MPVActivity, R.color.tts_volume_orange))
+            subtitleTtsVolumeSeekbar.progressTintList = ttsVolumeOrange
+            subtitleTtsVolumeSeekbar.thumbTintList = ttsVolumeOrange
+            subtitleTtsVolumeSeekbar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    subtitleTtsVolume = (progress.coerceIn(0, 100)) / 100f
+                    if (fromUser)
+                        writeSettings()
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
+
+            subtitleTtsLeadSeekbar.max = MAX_SUBTITLE_TTS_LEAD_MS / SUBTITLE_TTS_LEAD_STEP_MS
+            subtitleTtsLeadSeekbar.progressTintList = ttsVolumeOrange
+            subtitleTtsLeadSeekbar.thumbTintList = ttsVolumeOrange
+            subtitleTtsLeadSeekbar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                    subtitleTtsLeadMs = (progress * SUBTITLE_TTS_LEAD_STEP_MS)
+                        .coerceIn(0, MAX_SUBTITLE_TTS_LEAD_MS)
+                    updateSubtitleTtsLeadLabel()
+                    if (fromUser)
+                        writeSettings()
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+            })
         }
 
         player.setOnTouchListener { _, e ->
@@ -372,6 +413,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // take the background service with us
         stopServiceRunnable.run()
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
+        cancelPendingSubtitleTtsRunnables()
         subtitleTts?.stop()
         subtitleTts?.shutdown()
         subtitleTts = null
@@ -523,7 +565,14 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         this.newIntentReplace = prefs.getBoolean("new_intent_replace", false)
         this.smoothSeekGesture = prefs.getBoolean("seek_gesture_smooth", false)
         this.subtitleTtsEnabled = prefs.getBoolean("subtitle_tts_enabled", true)
-        updateSubtitleTtsButton()
+        val volumePercent = prefs.getInt("subtitle_tts_volume_percent", 60).coerceIn(0, 100)
+        this.subtitleTtsVolume = volumePercent / 100f
+        binding.subtitleTtsVolumeSeekbar.progress = volumePercent
+        this.subtitleTtsLeadMs = prefs.getInt("subtitle_tts_lead_ms", DEFAULT_SUBTITLE_TTS_LEAD_MS)
+            .coerceIn(0, MAX_SUBTITLE_TTS_LEAD_MS)
+        binding.subtitleTtsLeadSeekbar.progress =
+            subtitleTtsLeadMs / SUBTITLE_TTS_LEAD_STEP_MS
+        updateSubtitleTtsUi()
     }
 
     private fun writeSettings() {
@@ -532,6 +581,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         with (prefs.edit()) {
             putBoolean("use_time_remaining", useTimeRemaining)
             putBoolean("subtitle_tts_enabled", subtitleTtsEnabled)
+            putInt("subtitle_tts_volume_percent", (subtitleTtsVolume * 100f).toInt().coerceIn(0, 100))
+            putInt("subtitle_tts_lead_ms", subtitleTtsLeadMs.coerceIn(0, MAX_SUBTITLE_TTS_LEAD_MS))
             commit()
         }
     }
@@ -1738,16 +1789,28 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         binding.cycleSpeedBtn.text = getString(R.string.ui_speed, psc.speed)
     }
 
-    private fun updateSubtitleTtsButton() {
+    private fun updateSubtitleTtsUi() {
         val textRes = if (subtitleTtsEnabled) R.string.ui_tts_on else R.string.ui_tts_off
         binding.toggleSubtitleTtsBtn.text = getString(textRes)
+        binding.toggleSubtitleTtsBtn.setTextColor(if (subtitleTtsEnabled) Color.GREEN else Color.WHITE)
+        binding.subtitleTtsSettingsGroup.visibility = if (subtitleTtsEnabled) View.VISIBLE else View.GONE
+        updateSubtitleTtsLeadLabel()
+    }
+
+    private fun updateSubtitleTtsLeadLabel() {
+        binding.subtitleTtsLeadLabel.text = getString(
+            R.string.ui_tts_lead_ahead,
+            subtitleTtsLeadMs / 1000f
+        )
     }
 
     private fun toggleSubtitleTts() {
         subtitleTtsEnabled = !subtitleTtsEnabled
-        if (!subtitleTtsEnabled)
+        if (!subtitleTtsEnabled) {
+            cancelPendingSubtitleTtsRunnables()
             subtitleTts?.stop()
-        updateSubtitleTtsButton()
+        }
+        updateSubtitleTtsUi()
         writeSettings()
     }
 
@@ -1775,82 +1838,230 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         )
     }
 
+    private data class SubtitleCue(
+        val text: String,
+        val start: Double?,
+        val end: Double?
+    ) {
+        val key: String get() = "$start|$end|$text"
+    }
+
+    private fun cancelPendingSubtitleTtsRunnables() {
+        pendingSubtitleSpeakRunnable?.let { eventUiHandler.removeCallbacks(it) }
+        pendingSubtitleSpeakRunnable = null
+        pendingDeferredSpeakRunnable?.let { eventUiHandler.removeCallbacks(it) }
+        pendingDeferredSpeakRunnable = null
+    }
+
     private fun normalizeSubtitleText(text: String): String {
         return text.replace(Regex("\\s+"), " ").trim()
     }
 
-    private fun subtitleWordCount(text: String): Int {
+    private fun subtitleCharCount(text: String): Int {
         val normalizedText = normalizeSubtitleText(text)
         if (normalizedText.isEmpty())
             return 0
-        return normalizedText.split(Regex("\\s+")).size
+        return normalizedText.replace(Regex("[\\p{Punct}\\s]"), "").length
     }
 
-    private fun subtitleDurationSec(): Double? {
-        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
-        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+    private fun playbackSpeed(): Double {
+        return MPVLib.getPropertyDouble("speed") ?: psc.speed.toDouble()
+    }
+
+    private fun currentPlaybackTimeSec(): Double {
+        return MPVLib.getPropertyDouble("time-pos") ?: psc.positionSec.toDouble()
+    }
+
+    private fun subtitleDurationSec(start: Double?, end: Double?): Double? {
         if (start == null || end == null)
             return null
-
         val duration = end - start
         return if (duration > 0.0) duration else null
     }
 
-    private fun speechRateForSubtitle(text: String): Float {
-        val wordCount = subtitleWordCount(text)
-        if (wordCount == 0)
-            return DEFAULT_SUBTITLE_SPEECH_RATE
-
-        val duration = subtitleDurationSec()
-            ?: (wordCount / VIETNAMESE_WORDS_PER_SECOND)
-        val availableDuration = (duration - SUBTITLE_TTS_TIMING_MARGIN_SEC)
-            .coerceAtLeast(MIN_SUBTITLE_TTS_DURATION_SEC)
-        val rate = wordCount / (VIETNAMESE_WORDS_PER_SECOND * availableDuration)
-
-        // Keep "normal" pace for short text even if subtitle duration is long.
-        // (i.e. do not slow down below DEFAULT_SUBTITLE_SPEECH_RATE)
-        return rate.toFloat().coerceIn(DEFAULT_SUBTITLE_SPEECH_RATE, MAX_SUBTITLE_SPEECH_RATE)
+    private fun estimatedSpeechDurationSec(text: String, rate: Float): Double {
+        val chars = subtitleCharCount(text).coerceAtLeast(1)
+        val naturalDuration = SUBTITLE_SPEECH_BASE_SEC +
+            (chars / VIETNAMESE_CHARS_PER_SECOND)
+        return naturalDuration / rate.coerceAtLeast(0.1f)
     }
 
-    private fun speakSubtitle(text: String) {
+    private fun speechRateForSubtitle(text: String, start: Double?, end: Double?): Float {
+        val chars = subtitleCharCount(text)
+        if (chars == 0)
+            return DEFAULT_SUBTITLE_SPEECH_RATE
+
+        val duration = subtitleDurationSec(start, end)
+            ?: estimatedSpeechDurationSec(text, DEFAULT_SUBTITLE_SPEECH_RATE)
+        val availableDuration = (duration - SUBTITLE_TTS_TIMING_MARGIN_SEC)
+            .coerceAtLeast(MIN_SUBTITLE_TTS_DURATION_SEC)
+        val naturalDuration = estimatedSpeechDurationSec(text, DEFAULT_SUBTITLE_SPEECH_RATE)
+        val rate = (naturalDuration / availableDuration).toFloat()
+
+        return rate.coerceIn(DEFAULT_SUBTITLE_SPEECH_RATE, MAX_SUBTITLE_SPEECH_RATE)
+    }
+
+    private fun buildSubtitleCue(text: String): SubtitleCue {
+        val normalizedText = normalizeSubtitleText(text)
+        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
+        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
+        return SubtitleCue(normalizedText, start, end)
+    }
+
+    private fun isStillSpeaking(): Boolean {
+        if (lastSpeakEstimatedDurationMs <= 0L)
+            return false
+        val elapsed = SystemClock.uptimeMillis() - lastSpeakWallTimeMs
+        return elapsed < lastSpeakEstimatedDurationMs
+    }
+
+    private fun remainingSpeakMs(): Long {
+        if (!isStillSpeaking())
+            return 0L
+        return (lastSpeakEstimatedDurationMs -
+            (SystemClock.uptimeMillis() - lastSpeakWallTimeMs)).coerceAtLeast(0L)
+    }
+
+    private fun isSubtitleContinuation(cue: SubtitleCue): Boolean {
+        val previousEnd = lastSpeakEndTime ?: return false
+        val nextStart = cue.start ?: return false
+        return (nextStart - previousEnd) <= SUBTITLE_TTS_CONTINUATION_GAP_SEC
+    }
+
+    private fun resetSubtitleTtsTimingState() {
+        cancelPendingSubtitleTtsRunnables()
+        lastSpokenSubtitleKey = ""
+        lastSpeakWallTimeMs = 0L
+        lastSpeakEstimatedDurationMs = 0L
+        lastSpeakEndTime = null
+    }
+
+    private fun onPlaybackTimePosChanged(timePosSec: Double) {
+        if (lastCheckedTimePosSec >= 0.0 &&
+            kotlin.math.abs(timePosSec - lastCheckedTimePosSec) > SUBTITLE_TTS_SEEK_RESET_SEC
+        ) {
+            resetSubtitleTtsTimingState()
+            subtitleTts?.stop()
+        }
+        lastCheckedTimePosSec = timePosSec
+        maybeSpeakSubtitleForCurrentTime()
+    }
+
+    private fun scheduleSubtitleSpeak(text: String) {
         if (!subtitleTtsEnabled || !subtitleTtsReady)
             return
 
-        val normalizedText = normalizeSubtitleText(text)
-        if (normalizedText.isEmpty())
+        val cue = buildSubtitleCue(text)
+        if (cue.text.isEmpty()) {
+            cancelPendingSubtitleTtsRunnables()
+            return
+        }
+
+        cancelPendingSubtitleTtsRunnables()
+
+        val timePos = currentPlaybackTimeSec()
+        val leadSec = subtitleTtsLeadMs / 1000.0
+        val speakAt = (cue.start ?: timePos) - leadSec
+        val delayMs = ((speakAt - timePos) / playbackSpeed())
+            .coerceAtLeast(0.0) * 1000.0
+
+        if (delayMs <= 0.0) {
+            speakSubtitle(cue)
+        } else {
+            val runnable = Runnable { speakSubtitle(cue) }
+            pendingSubtitleSpeakRunnable = runnable
+            eventUiHandler.postDelayed(runnable, delayMs.toLong())
+        }
+    }
+
+    private fun maybeSpeakSubtitleForCurrentTime() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady || pendingSubtitleSpeakRunnable != null)
             return
 
-        val start = MPVLib.getPropertyDouble("sub-start/full") ?: currentSubStart
-        val end = MPVLib.getPropertyDouble("sub-end/full") ?: currentSubEnd
-        val subtitleKey = "$start|$end|$normalizedText"
-        if (subtitleKey == lastSpokenSubtitleKey)
+        val text = normalizeSubtitleText(MPVLib.getPropertyString("sub-text") ?: "")
+        if (text.isEmpty())
             return
-        // New subtitle arrived before previous finished -> interrupt the old one.
-        subtitleTts?.stop()
-        lastSpokenSubtitleKey = subtitleKey
 
-        val rate = speechRateForSubtitle(normalizedText)
+        val cue = buildSubtitleCue(text)
+        if (cue.key == lastSpokenSubtitleKey)
+            return
+
+        val timePos = currentPlaybackTimeSec()
+        val leadSec = subtitleTtsLeadMs / 1000.0
+        val speakAt = (cue.start ?: timePos) - leadSec
+        if (timePos >= speakAt)
+            speakSubtitle(cue)
+    }
+
+    private fun scheduleDeferredSpeak(cue: SubtitleCue, delayMs: Long) {
+        cancelPendingSubtitleTtsRunnables()
+        val runnable = Runnable { doSpeakSubtitle(cue) }
+        pendingDeferredSpeakRunnable = runnable
+        eventUiHandler.postDelayed(runnable, delayMs.coerceAtLeast(0L))
+    }
+
+    private fun speakSubtitle(cue: SubtitleCue) {
+        if (!subtitleTtsEnabled || !subtitleTtsReady)
+            return
+        if (cue.text.isEmpty())
+            return
+        if (cue.key == lastSpokenSubtitleKey)
+            return
+
+        cancelPendingSubtitleTtsRunnables()
+
+        if (isStillSpeaking()) {
+            val remainingMs = remainingSpeakMs()
+            if (remainingMs in 1..SUBTITLE_TTS_INTERRUPT_GRACE_MS ||
+                isSubtitleContinuation(cue)
+            ) {
+                scheduleDeferredSpeak(cue, remainingMs)
+                return
+            }
+            subtitleTts?.stop()
+        }
+
+        doSpeakSubtitle(cue)
+    }
+
+    private fun doSpeakSubtitle(cue: SubtitleCue) {
+        if (!subtitleTtsEnabled || !subtitleTtsReady)
+            return
+        if (cue.key == lastSpokenSubtitleKey)
+            return
+
+        val rate = speechRateForSubtitle(cue.text, cue.start, cue.end)
         subtitleTts?.setSpeechRate(rate)
         Log.d(
             TAG,
-            "subtitle TTS speak: rate=$rate requested=${Settings.Secure.getString(contentResolver, "tts_default_synth")} runtimeDefault=${subtitleTts?.defaultEngine}"
+            "subtitle TTS speak: rate=$rate leadMs=$subtitleTtsLeadMs requested=${Settings.Secure.getString(contentResolver, "tts_default_synth")} runtimeDefault=${subtitleTts?.defaultEngine}"
         )
+        val params = Bundle().apply {
+            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, subtitleTtsVolume.coerceIn(0f, 1f))
+        }
         subtitleTts?.speak(
-            normalizedText,
+            cue.text,
             TextToSpeech.QUEUE_FLUSH,
-            null,
+            params,
             "mpv-subtitle-${SystemClock.uptimeMillis()}"
         )
+
+        lastSpokenSubtitleKey = cue.key
+        lastSpeakWallTimeMs = SystemClock.uptimeMillis()
+        lastSpeakEstimatedDurationMs =
+            (estimatedSpeechDurationSec(cue.text, rate) * 1000.0).toLong()
+        lastSpeakEndTime = cue.end
     }
 
     private fun showSubTextDebug(text: String) {
         val trimmedText = normalizeSubtitleText(text)
         if (trimmedText.isEmpty()) {
             binding.subTextDebugView.visibility = View.GONE
+            cancelPendingSubtitleTtsRunnables()
             return
         }
         binding.subTextDebugView.visibility = View.GONE
-        speakSubtitle(trimmedText)
+        scheduleSubtitleSpeak(trimmedText)
     }
 
     private fun updatePlaylistButtons() {
@@ -2017,7 +2228,10 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: Long) {
         if (!activityIsForeground) return
         when (property) {
-            "time-pos" -> updatePlaybackPos(psc.positionSec)
+            "time-pos" -> {
+                updatePlaybackPos(psc.positionSec)
+                onPlaybackTimePosChanged(value.toDouble())
+            }
             "playlist-pos", "playlist-count" -> updatePlaylistButtons()
         }
     }
@@ -2258,12 +2472,18 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         // resolution (px) of the thumbnail displayed with playback notification
         private const val THUMB_SIZE = 384
         private const val SUB_TEXT_DEBUG_TIMEOUT = 3000L
-        private const val VIETNAMESE_WORDS_PER_SECOND = 2.8
+        private const val DEFAULT_SUBTITLE_TTS_LEAD_MS = 500
+        private const val MAX_SUBTITLE_TTS_LEAD_MS = 2000
+        private const val SUBTITLE_TTS_LEAD_STEP_MS = 100
+        private const val SUBTITLE_TTS_INTERRUPT_GRACE_MS = 300L
+        private const val SUBTITLE_TTS_CONTINUATION_GAP_SEC = 0.25
+        private const val SUBTITLE_TTS_SEEK_RESET_SEC = 2.0
+        private const val SUBTITLE_SPEECH_BASE_SEC = 0.25
+        private const val VIETNAMESE_CHARS_PER_SECOND = 14.0
         private const val SUBTITLE_TTS_TIMING_MARGIN_SEC = 0.15
         private const val MIN_SUBTITLE_TTS_DURATION_SEC = 0.45
         private const val DEFAULT_SUBTITLE_SPEECH_RATE = 1.0f
-        private const val MIN_SUBTITLE_SPEECH_RATE = 0.75f
-        private const val MAX_SUBTITLE_SPEECH_RATE = 2.5f
+        private const val MAX_SUBTITLE_SPEECH_RATE = 1.4f
         // smallest aspect ratio that is considered non-square
         private const val ASPECT_RATIO_MIN = 1.2f // covers 5:4 and up
         // fraction to which audio volume is ducked on loss of audio focus
