@@ -41,6 +41,7 @@ class EmbeddedSubtitleTts(context: Context) {
     private var stopRequested = false
 
     private val playGeneration = AtomicInteger(0)
+    private val engineLock = Any()
     private var audioTrack: AudioTrack? = null
     private var audioTrackSampleRate = 0
     private val usePcmFloat = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
@@ -100,7 +101,9 @@ class EmbeddedSubtitleTts(context: Context) {
     /** Unload ONNX from RAM; model files stay on disk. */
     fun releaseEngines() {
         worker.execute {
-            releaseAllEngines()
+            synchronized(engineLock) {
+                releaseAllEngines()
+            }
             Log.i(TAG, "TTS engines released from memory")
         }
     }
@@ -154,6 +157,7 @@ class EmbeddedSubtitleTts(context: Context) {
         )
     }
 
+    /** Caller must hold [engineLock]. */
     private fun ensureViEngine(): OfflineTts {
         viTts?.let { return it }
 
@@ -170,6 +174,7 @@ class EmbeddedSubtitleTts(context: Context) {
         return engine
     }
 
+    /** Caller must hold [engineLock]. */
     private fun ensureEnEngine(): OfflineTts {
         enTts?.let { return it }
 
@@ -188,13 +193,15 @@ class EmbeddedSubtitleTts(context: Context) {
 
     private fun engineFor(lang: SubtitleTextSegmenter.Lang): OfflineTts? {
         return try {
-            // Only one Piper model in RAM at a time (avoids OOM / native crash on mid-range phones).
-            if (activeLang != null && activeLang != lang)
-                releaseAllEngines()
-            activeLang = lang
-            when (lang) {
-                SubtitleTextSegmenter.Lang.EN -> ensureEnEngine()
-                SubtitleTextSegmenter.Lang.VI -> ensureViEngine()
+            synchronized(engineLock) {
+                // Only one Piper model in RAM at a time (avoids OOM / native crash on mid-range phones).
+                if (activeLang != null && activeLang != lang)
+                    releaseAllEngines()
+                activeLang = lang
+                when (lang) {
+                    SubtitleTextSegmenter.Lang.EN -> ensureEnEngine()
+                    SubtitleTextSegmenter.Lang.VI -> ensureViEngine()
+                }
             }
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to load ${lang.name} TTS engine", t)
@@ -215,6 +222,7 @@ class EmbeddedSubtitleTts(context: Context) {
         stopRequested = false
 
         worker.execute {
+            synchronized(engineLock) {
             if (generation != playGeneration.get())
                 return@execute
 
@@ -267,6 +275,7 @@ class EmbeddedSubtitleTts(context: Context) {
                 Log.e(TAG, "speak native error for \"$text\"", e)
                 notifyError("TTS native error")
             }
+            }
         }
     }
 
@@ -281,7 +290,9 @@ class EmbeddedSubtitleTts(context: Context) {
 
     fun shutdown() {
         stop()
-        worker.execute { releaseAllEngines() }
+        worker.execute {
+            synchronized(engineLock) { releaseAllEngines() }
+        }
         worker.shutdown()
         mainHandler.post {
             audioTrack?.release()

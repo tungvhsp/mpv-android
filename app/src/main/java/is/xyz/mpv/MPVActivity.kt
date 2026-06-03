@@ -93,7 +93,13 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private var currentSubStart: Double? = null
     private var currentSubEnd: Double? = null
     private var lastSpokenSubtitleKey = ""
+    private var pendingSubtitleTtsText: String? = null
     private val subtitleTextPollRunnable = Runnable { pollSubtitleTextForTts() }
+    private val subtitleTtsDebounceRunnable = Runnable {
+        val text = pendingSubtitleTtsText ?: return@Runnable
+        pendingSubtitleTtsText = null
+        speakSubtitle(text)
+    }
 
     private val psc = Utils.PlaybackStateCache()
     private var mediaSession: MediaSessionCompat? = null
@@ -392,6 +398,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         stopServiceRunnable.run()
         fadeHandler.removeCallbacks(hideSubTextDebugRunnable)
         stopSubtitleTextPolling()
+        fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
         embeddedSubtitleTts?.shutdown()
         embeddedSubtitleTts = null
         subtitleTtsReady = false
@@ -1230,8 +1237,9 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun cycleAudio() = trackSwitchNotification {
         player.cycleAudio(); TrackData(player.aid, "audio")
     }
-    private fun cycleSub() = trackSwitchNotification {
-        player.cycleSub(); TrackData(player.sid, "sub")
+    private fun cycleSub() {
+        trackSwitchNotification { player.cycleSub(); TrackData(player.sid, "sub") }
+        onSubtitleTrackChanged()
     }
 
     private fun selectTrack(type: String, get: () -> Int, set: (Int) -> Unit) {
@@ -1266,6 +1274,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
                 player.sid = it.mpvId
             dialog.dismiss()
             trackSwitchNotification { TrackData(it.mpvId, SubTrackDialog.TRACK_TYPE) }
+            if (!secondary)
+                onSubtitleTrackChanged()
         }
 
         dialog = with (AlertDialog.Builder(this)) {
@@ -1775,6 +1785,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
             embeddedSubtitleTts?.stop()
             embeddedSubtitleTts?.releaseEngines()
             stopSubtitleTextPolling()
+            fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
             lastSpokenSubtitleKey = ""
         } else {
             prepareEmbeddedSubtitleTts(showErrors = true)
@@ -1792,17 +1803,38 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun onSubtitleTtsModelsReady() {
+        updateSubtitleTtsPipeline()
+    }
+
+    private fun isSubtitleTrackActive(): Boolean = player.sid >= 0
+
+    private fun updateSubtitleTtsPipeline() {
+        if (!subtitleTtsEnabled || !subtitleTtsReady) {
+            stopSubtitleTextPolling()
+            return
+        }
+        if (!isSubtitleTrackActive()) {
+            stopSubtitleTextPolling()
+            embeddedSubtitleTts?.stop()
+            return
+        }
         ensureSubtitleTextObservation()
         startSubtitleTextPolling()
         lastSpokenSubtitleKey = ""
-        pollSubtitleTextForTts()
+    }
+
+    private fun onSubtitleTrackChanged() {
+        lastSpokenSubtitleKey = ""
+        fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
+        pendingSubtitleTtsText = null
+        updateSubtitleTtsPipeline()
     }
 
     private fun startSubtitleTextPolling() {
         if (!subtitleTtsEnabled || !subtitleTtsReady)
             return
         fadeHandler.removeCallbacks(subtitleTextPollRunnable)
-        fadeHandler.postDelayed(subtitleTextPollRunnable, 400L)
+        fadeHandler.postDelayed(subtitleTextPollRunnable, 800L)
     }
 
     private fun stopSubtitleTextPolling() {
@@ -1810,7 +1842,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun pollSubtitleTextForTts() {
-        if (!subtitleTtsEnabled || !subtitleTtsReady) {
+        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive()) {
             stopSubtitleTextPolling()
             return
         }
@@ -1821,7 +1853,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
         } catch (t: Throwable) {
             Log.e(TAG, "subtitle text poll failed", t)
         }
-        fadeHandler.postDelayed(subtitleTextPollRunnable, 400L)
+        fadeHandler.postDelayed(subtitleTextPollRunnable, 800L)
     }
 
     private fun initSubtitleTts() {
@@ -1970,7 +2002,7 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun speakSubtitle(text: String) {
-        if (!subtitleTtsEnabled || !subtitleTtsReady)
+        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive())
             return
 
         val normalizedText = normalizeSubtitleText(text)
@@ -2013,14 +2045,16 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     }
 
     private fun handleSubtitleTextForTts(text: String) {
-        if (!subtitleTtsEnabled || !subtitleTtsReady)
+        if (!subtitleTtsEnabled || !subtitleTtsReady || !isSubtitleTrackActive())
             return
 
         val trimmedText = normalizeSubtitleText(text)
         if (trimmedText.isEmpty())
             return
 
-        speakSubtitle(trimmedText)
+        pendingSubtitleTtsText = trimmedText
+        fadeHandler.removeCallbacks(subtitleTtsDebounceRunnable)
+        fadeHandler.postDelayed(subtitleTtsDebounceRunnable, 500L)
     }
 
     private fun updatePlaylistButtons() {
@@ -2208,7 +2242,8 @@ class MPVActivity : AppCompatActivity(), MPVLib.EventObserver, TouchGesturesObse
     private fun eventPropertyUi(property: String, value: String, metaUpdated: Boolean) {
         if (!activityIsForeground) return
         when (property) {
-            "sub-text" -> if (subtitleTtsEnabled && subtitleTtsReady) showSubTextDebug(value)
+            "sub-text" -> if (subtitleTtsEnabled && subtitleTtsReady && isSubtitleTrackActive())
+                showSubTextDebug(value)
             "speed" -> updateSpeedButton()
         }
         if (metaUpdated)
